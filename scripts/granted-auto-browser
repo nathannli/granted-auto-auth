@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+
+PLAYWRIGHT_VERSION = "1.62.0"
+CONTROLLER = Path(__file__).resolve()
+SCRIPTS_DIR = CONTROLLER.parent
+SIDECAR = SCRIPTS_DIR / "granted_auto_browser.py"
+LOCKFILE = SCRIPTS_DIR / "granted_auto_browser.py.lock"
+STATE_DIR = Path.home() / ".config/granted-auto-auth"
+STATE_FILE = STATE_DIR / "install.toml"
+CREDENTIALS_FILE = STATE_DIR / "credentials.toml"
+GRANTED_CONFIG = Path.home() / ".granted/config"
+AWS_CONFIG = Path.home() / ".aws/config"
+CONTAINER_MARKER = Path("/.dockerenv")
+
+
+class ControllerError(Exception):
+    pass
+
+
+def _validate_file(path: Path, result: os.stat_result, allowed_mode: int = 0o600) -> None:
+    if not stat.S_ISREG(result.st_mode):
+        raise ControllerError(f"{path.name} is not a regular file")
+    if result.st_uid != os.getuid():
+        raise ControllerError(f"{path.name} owner is invalid")
+    if stat.S_IMODE(result.st_mode) & ~allowed_mode:
+        raise ControllerError(f"{path.name} permissions are too permissive")
+
+
+def read_secure_toml(path: Path) -> dict[str, object]:
+    parent = os.lstat(path.parent)
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        raise ControllerError(f"{path.parent.name} is not a real directory")
+    if parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & ~0o700:
+        raise ControllerError(f"{path.parent.name} permissions are too permissive")
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode):
+        raise ControllerError(f"{path.name} must not be a symlink")
+    _validate_file(path, before)
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        after = os.fstat(descriptor)
+        _validate_file(path, after)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise ControllerError(f"{path.name} changed while opening")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            return tomllib.load(stream)
+    finally:
+        os.close(descriptor)
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value)
+    raise TypeError(f"unsupported state type: {type(value).__name__}")
+
+
+def write_state(values: dict[str, object]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(STATE_DIR, 0o700)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".install.", suffix=".tmp", dir=STATE_DIR)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        data = "".join(f"{key} = {_toml_value(value)}\n" for key, value in values.items()).encode()
+        os.write(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, STATE_FILE)
+        directory_descriptor = os.open(STATE_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def granted_config() -> dict[str, object]:
+    try:
+        with GRANTED_CONFIG.open("rb") as stream:
+            return tomllib.load(stream)
+    except (FileNotFoundError, tomllib.TOMLDecodeError) as error:
+        raise ControllerError("unable to read Granted config") from error
+
+
+def custom_sso_browser_path() -> str:
+    value = granted_config().get("CustomSSOBrowserPath", "")
+    if not isinstance(value, str):
+        raise ControllerError("Granted CustomSSOBrowserPath is invalid")
+    return value
+
+
+def run_checked(arguments: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["GRANTED_ALIAS_CONFIGURED"] = "true"
+    try:
+        return subprocess.run(
+            arguments,
+            check=True,
+            text=True,
+            capture_output=capture,
+            env=environment,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise ControllerError(f"command failed: {Path(arguments[0]).name}") from error
+
+
+def set_custom_browser(value: str) -> None:
+    run_checked(["granted", "settings", "set", "--setting", "CustomSSOBrowserPath", "--value", value], capture=True)
+    if custom_sso_browser_path() != value:
+        raise ControllerError("Granted browser setting did not persist")
+
+
+def base_state(previous: str) -> dict[str, object]:
+    return {
+        "phase": "prepared",
+        "previous_browser_path": previous,
+        "executable_path": str(SIDECAR),
+        "chromium_path": "",
+        "playwright_version": PLAYWRIGHT_VERSION,
+        "chromium_revision": "",
+    }
+
+
+def recover_install_state() -> str:
+    if not STATE_FILE.exists():
+        return custom_sso_browser_path()
+    state = read_secure_toml(STATE_FILE)
+    if state.get("executable_path") != str(SIDECAR):
+        raise ControllerError("install state belongs to another executable")
+    previous = state.get("previous_browser_path")
+    if not isinstance(previous, str):
+        raise ControllerError("saved browser setting is invalid")
+    current = custom_sso_browser_path()
+    phase = state.get("phase")
+    if phase == "configured":
+        if current != str(SIDECAR):
+            raise ControllerError("configured install state does not match Granted")
+        return previous
+    if phase not in {"prepared", "chromium_ready", "uninstalling"}:
+        raise ControllerError("install state phase is invalid")
+    if current == str(SIDECAR):
+        set_custom_browser(previous)
+    elif current != previous:
+        raise ControllerError("partial install conflicts with Granted browser setting")
+    STATE_FILE.unlink()
+    return previous
+
+
+def rollback_install(previous: str) -> None:
+    current = custom_sso_browser_path()
+    if current == str(SIDECAR):
+        set_custom_browser(previous)
+    elif current != previous:
+        raise ControllerError("failed install conflicts with Granted browser setting")
+    STATE_FILE.unlink(missing_ok=True)
+
+
+def provision_chromium() -> tuple[str, str]:
+    if not SIDECAR.is_file() or not LOCKFILE.is_file():
+        raise ControllerError("sidecar or script lock is missing")
+    run_checked(["uv", "lock", "--check", "--script", str(SIDECAR)])
+    run_checked(["uv", "run", "--with", f"playwright=={PLAYWRIGHT_VERSION}", "playwright", "install", "chromium"])
+    probe = run_checked(
+        [
+            "uv",
+            "run",
+            "--offline",
+            "--with",
+            f"playwright=={PLAYWRIGHT_VERSION}",
+            "python",
+            "-c",
+            "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()",
+        ],
+        capture=True,
+    )
+    chromium = probe.stdout.strip()
+    path = Path(chromium)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ControllerError("provisioned Chromium executable is missing")
+    revision_match = re.search(r"chromium-[^/]*?(\d+)", chromium)
+    revision = revision_match.group(1) if revision_match else path.parent.name
+    return chromium, revision
+
+
+def enabled() -> bool:
+    try:
+        state = read_secure_toml(STATE_FILE)
+        chromium = str(state.get("chromium_path", ""))
+        revision = str(state.get("chromium_revision", ""))
+        return all(
+            (
+                state.get("phase") == "configured",
+                state.get("executable_path") == str(SIDECAR),
+                state.get("playwright_version") == PLAYWRIGHT_VERSION,
+                custom_sso_browser_path() == str(SIDECAR),
+                SIDECAR.is_file() and os.access(SIDECAR, os.X_OK),
+                LOCKFILE.is_file(),
+                isinstance(state.get("chromium_path"), str),
+                isinstance(state.get("chromium_revision"), str) and bool(revision),
+                f"chromium-{revision}" in chromium,
+                Path(chromium).is_file(),
+                os.access(chromium, os.X_OK),
+            )
+        )
+    except (ControllerError, FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError):
+        return False
+
+
+def install() -> None:
+    if enabled():
+        print("granted-auto-auth is already installed")
+        return
+    previous = recover_install_state()
+    state = base_state(previous)
+    write_state(state)
+    try:
+        chromium, revision = provision_chromium()
+        state.update(phase="chromium_ready", chromium_path=chromium, chromium_revision=revision)
+        write_state(state)
+        set_custom_browser(str(SIDECAR))
+        state["phase"] = "configured"
+        write_state(state)
+    except Exception:
+        try:
+            rollback_install(previous)
+        except ControllerError:
+            pass
+        raise
+    print("granted-auto-auth installed")
+
+
+def uninstall() -> None:
+    state = read_secure_toml(STATE_FILE)
+    expected = state.get("executable_path")
+    if expected != str(SIDECAR) or custom_sso_browser_path() != str(SIDECAR):
+        raise ControllerError("refusing to overwrite unrelated Granted browser setting")
+    state["phase"] = "uninstalling"
+    write_state(state)
+    previous = state.get("previous_browser_path")
+    if not isinstance(previous, str):
+        raise ControllerError("saved browser setting is invalid")
+    set_custom_browser(previous)
+    STATE_FILE.unlink()
+    print("granted-auto-auth uninstalled; Chromium and browser profile were preserved")
+
+
+def _credential_health() -> list[str]:
+    failures: list[str] = []
+    try:
+        values = read_secure_toml(CREDENTIALS_FILE)
+        for field in ("username", "password", "totp_secret", "idp"):
+            if not isinstance(values.get(field), str) or not str(values[field]).strip():
+                failures.append(f"credential field missing: {field}")
+    except (ControllerError, FileNotFoundError, tomllib.TOMLDecodeError, OSError) as error:
+        failures.append(str(error))
+    return failures
+
+
+def _legacy_profiles() -> list[str]:
+    try:
+        text = AWS_CONFIG.read_text()
+    except OSError:
+        return []
+    current = ""
+    legacy: list[str] = []
+    has_start = False
+    has_session = False
+    for line in [*text.splitlines(), "[end]"]:
+        section = re.match(r"^\[(?:profile )?([^]]+)\]$", line.strip())
+        if section:
+            if current and has_start and not has_session:
+                legacy.append(current)
+            current = section.group(1)
+            has_start = False
+            has_session = False
+        elif re.match(r"^\s*sso_start_url\s*=", line):
+            has_start = True
+        elif re.match(r"^\s*sso_session\s*=", line):
+            has_session = True
+    return legacy
+
+
+def doctor() -> int:
+    failures = _credential_health()
+    warnings: list[str] = []
+    try:
+        version = run_checked(["granted", "--version"], capture=True).stdout.strip()
+        if "0.39." not in version:
+            failures.append("Granted v0.39.x is required")
+        config = granted_config()
+        if config.get("UseAuthorizationCode") is not True:
+            failures.append("UseAuthorizationCode must be true")
+        if config.get("DisableCredentialProcessCache", False) is not False:
+            failures.append("DisableCredentialProcessCache must be false")
+    except ControllerError as error:
+        failures.append(str(error))
+    if not enabled():
+        failures.append("installation is not enabled")
+    browser_dir = Path.home() / ".local/share/granted-auto-auth/browser"
+    if browser_dir.exists() and (browser_dir.stat().st_uid != os.getuid() or stat.S_IMODE(browser_dir.stat().st_mode) & ~0o700):
+        failures.append("browser profile permissions are too permissive")
+    legacy = _legacy_profiles()
+    if legacy:
+        warnings.append(f"legacy inline SSO profiles detected: {len(legacy)}")
+    if CONTAINER_MARKER.exists():
+        warnings.append("container detected: Granted may use device flow with legacy scopes")
+    for warning in warnings:
+        print(f"WARN: {warning}")
+    for failure in failures:
+        print(f"FAIL: {failure}")
+    if failures:
+        return 1
+    print("OK: granted-auto-auth is ready")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 1 or argv[0] not in {"doctor", "enabled", "install", "uninstall"}:
+        print("usage: granted-auto-browser doctor|enabled|install|uninstall", file=sys.stderr)
+        return 2
+    command = argv[0]
+    try:
+        if command == "enabled":
+            return 0 if enabled() else 1
+        if command == "doctor":
+            return doctor()
+        if command == "install":
+            install()
+        else:
+            uninstall()
+        return 0
+    except (ControllerError, FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError) as error:
+        print(f"granted-auto-browser: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

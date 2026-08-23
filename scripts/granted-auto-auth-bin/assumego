@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+import time
+
+
+def main() -> int:
+    real_value = os.environ.get("GRANTED_AUTO_AUTH_REAL_ASSUMEGO", "")
+    deadline_value = os.environ.get("GRANTED_AUTO_AUTH_DEADLINE_NS", "")
+    try:
+        deadline = int(deadline_value)
+    except ValueError:
+        print("granted-auto-auth: invalid shared deadline", file=sys.stderr)
+        return 124
+    real = os.path.realpath(real_value)
+    current = os.path.realpath(__file__)
+    if not os.path.isabs(real_value) or real == current or not os.path.isfile(real) or not os.access(real, os.X_OK):
+        print("granted-auto-auth: invalid real assumego executable", file=sys.stderr)
+        return 126
+    if time.monotonic_ns() >= deadline:
+        print("granted-auto-auth: authentication deadline expired", file=sys.stderr)
+        return 124
+    process = subprocess.Popen([real, *sys.argv[1:]], start_new_session=True)
+
+    def forward(sig: int, _frame: object) -> None:
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    for handled in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(handled, forward)
+    while True:
+        status = process.poll()
+        if status is not None:
+            return status
+        remaining = (deadline - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            print("granted-auto-auth: authentication exceeded 180 seconds", file=sys.stderr)
+            return 124
+        time.sleep(min(0.05, remaining))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

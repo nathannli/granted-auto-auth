@@ -1,0 +1,6 @@
+credentials.toml
+install.toml
+.reposcry/
+.reposcryignore
+__pycache__/
+.pytest_cache/
