@@ -31,6 +31,14 @@ PAGES = {
         <label for="password">Password</label><input id="password" type="password">
         <button onclick="location='/totp'">Sign in</button>
     """,
+    "/password-optional-challenge": """
+        <p>You can use a security key instead.</p>
+        <label for="password">Password</label><input id="password" type="password">
+        <button onclick="sessionStorage.setItem('password_submit_count', Number(sessionStorage.getItem('password_submit_count') || 0) + 1); location='/approval-counted'">Sign in</button>
+        <script>
+            password.addEventListener('input', () => sessionStorage.setItem('password_fill_count', Number(sessionStorage.getItem('password_fill_count') || 0) + 1))
+        </script>
+    """,
     "/totp": """
         <label for="totp">MFA code</label><input id="totp">
         <button onclick="location='/approval'">Verify</button>
@@ -52,6 +60,11 @@ PAGES = {
         <h1>Authorize Granted CLI</h1>
         <button onclick="location='/authentication-status'">Allow access</button>
     """,
+    "/approval-counted": """
+        <h1>Authorize Granted CLI</h1>
+        <p>A security key is another sign-in option.</p>
+        <button onclick="sessionStorage.setItem('approval_count', Number(sessionStorage.getItem('approval_count') || 0) + 1); location='/oauth/callback'">Allow access</button>
+    """,
     "/authentication-status": """
         <h1>Authentication Status</h1>
         <script>setTimeout(() => location='/oauth/callback', 1000)</script>
@@ -59,6 +72,13 @@ PAGES = {
     "/repeated-username": """
         <label for="username">Username</label><input id="username">
         <button onclick="location='/repeated-username'">Next</button>
+    """,
+    "/transient-unsupported": """
+        <p>Checking security key availability.</p>
+        <script>setTimeout(() => location='/approval', 100)</script>
+    """,
+    "/persistent-unsupported": """
+        <p>Use your security key to continue.</p>
     """,
     "/unknown": "<h1>CAPTCHA required</h1>",
     "/timeout": "<h1>Waiting</h1>",
@@ -122,6 +142,20 @@ class PlaywrightFixtureTests(unittest.TestCase):
     def test_remembered_username_password_form(self) -> None:
         self.run_flow("/password")
 
+    def test_optional_challenge_copy_does_not_override_supported_controls(self) -> None:
+        page = self.browser.new_page()
+        try:
+            page.goto(self.base + "/password-optional-challenge")
+            original_context = page.context
+            sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 20_000_000_000)
+            self.assertIs(page.context, original_context)
+            self.assertEqual(urlsplit(page.url).path, "/oauth/callback")
+            self.assertEqual(page.evaluate("sessionStorage.getItem('password_fill_count')"), "1")
+            self.assertEqual(page.evaluate("sessionStorage.getItem('password_submit_count')"), "1")
+            self.assertEqual(page.evaluate("sessionStorage.getItem('approval_count')"), "1")
+        finally:
+            page.close()
+
     def test_optional_totp_is_skipped(self) -> None:
         self.run_flow("/combined")
 
@@ -182,12 +216,40 @@ class PlaywrightFixtureTests(unittest.TestCase):
         page = self.browser.new_page()
         try:
             page.goto(self.base + "/unknown")
-            with self.assertRaises(sidecar.UnsupportedChallenge):
-                sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 5_000_000_000)
+            with mock.patch.object(sidecar, "_wait_unsupported_candidate", wraps=sidecar._wait_unsupported_candidate) as wait:
+                with self.assertRaises(sidecar.UnsupportedChallenge):
+                    sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 5_000_000_000)
+            wait.assert_not_called()
         finally:
             page.close()
 
-    def test_unknown_state_respects_shared_deadline(self) -> None:
+    def test_transient_unsupported_candidate_recovers_in_place(self) -> None:
+        page = self.browser.new_page()
+        try:
+            page.goto(self.base + "/transient-unsupported")
+            deadline = time.monotonic_ns() + 20_000_000_000
+            original_context = page.context
+            with mock.patch.object(sidecar, "_wait_unsupported_candidate", wraps=sidecar._wait_unsupported_candidate) as wait:
+                sidecar.automate_aws_login(page, self.credentials, deadline)
+            wait.assert_called_once_with(page, deadline)
+            self.assertIs(page.context, original_context)
+            self.assertEqual(urlsplit(page.url).path, "/oauth/callback")
+        finally:
+            page.close()
+
+    def test_persistent_unsupported_candidate_fails_after_one_recheck(self) -> None:
+        page = self.browser.new_page()
+        try:
+            page.goto(self.base + "/persistent-unsupported")
+            deadline = time.monotonic_ns() + 5_000_000_000
+            with mock.patch.object(sidecar, "_wait_unsupported_candidate", wraps=sidecar._wait_unsupported_candidate) as wait:
+                with self.assertRaises(sidecar.UnsupportedChallenge):
+                    sidecar.automate_aws_login(page, self.credentials, deadline)
+            wait.assert_called_once_with(page, deadline)
+        finally:
+            page.close()
+
+    def test_v55_unknown_state_respects_shared_deadline(self) -> None:
         page = self.browser.new_page()
         try:
             page.goto(self.base + "/timeout")

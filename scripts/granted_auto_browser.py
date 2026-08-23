@@ -336,6 +336,30 @@ def _visible(locator) -> bool:
         return False
 
 
+def _any_visible(locator) -> bool:
+    try:
+        return any(locator.nth(index).is_visible() for index in range(locator.count()))
+    except Exception:
+        return False
+
+
+def _blocking_unsupported_challenge(page: Page) -> bool:
+    semantic_states = (
+        page.get_by_role("heading").filter(has_text=UNSUPPORTED_TEXT),
+        page.get_by_role("dialog").filter(has_text=UNSUPPORTED_TEXT),
+        page.get_by_role("alert").filter(has_text=UNSUPPORTED_TEXT),
+        page.get_by_label(UNSUPPORTED_TEXT),
+    )
+    return any(_any_visible(locator) for locator in semantic_states)
+
+
+def _button_visible(page: Page, names: tuple[str, ...]) -> bool:
+    return any(
+        _visible(page.get_by_role("button", name=re.compile(rf"^{re.escape(name)}$", re.IGNORECASE)))
+        for name in names
+    )
+
+
 def _click(page: Page, names: tuple[str, ...], deadline: int) -> bool:
     for name in names:
         locator = page.get_by_role("button", name=re.compile(rf"^{re.escape(name)}$", re.IGNORECASE))
@@ -347,6 +371,14 @@ def _click(page: Page, names: tuple[str, ...], deadline: int) -> bool:
 
 def _wait_page(page: Page, deadline: int) -> None:
     page.wait_for_timeout(min(500, max(50, remaining_seconds(deadline) * 1_000)))
+    validate_redirect_url(page.url)
+
+
+def _wait_unsupported_candidate(page: Page, deadline: int) -> None:
+    if remaining_seconds(deadline) < 0.5:
+        raise AuthTimeout("not enough time to recheck unsupported challenge")
+    page.wait_for_timeout(500)
+    remaining_seconds(deadline)
     validate_redirect_url(page.url)
 
 
@@ -379,19 +411,36 @@ def safe_control_stage(labels: list[str], credentials: Credentials) -> str:
 def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> None:
     page.goto(page.url, wait_until="domcontentloaded", timeout=remaining_seconds(deadline) * 1_000)
     completed: set[str] = set()
+    unsupported_candidate = False
+    approval_names = ("Confirm and continue", "Allow access", "Allow", "Approve")
     for _ in range(12):
+        if remaining_seconds(deadline) < 0.05:
+            raise AuthTimeout("not enough time for next browser action")
         host = validate_redirect_url(page.url)
         if host in {"127.0.0.1", "localhost"} and is_callback_url(page.url):
             emit("success", "callback", credentials.idp)
             return
         body_text = page.locator("body").inner_text(timeout=min(3_000, remaining_seconds(deadline) * 1_000))
-        if UNSUPPORTED_TEXT.search(body_text):
-            raise UnsupportedChallenge("unsupported authentication challenge")
         username = page.get_by_label(re.compile(r"^Username$", re.IGNORECASE))
         password = page.get_by_label(re.compile(r"^Password$", re.IGNORECASE))
         totp = page.get_by_label(
             re.compile(r"^(MFA code|Authenticator code|Authentication code|One-time password|Verification code)$", re.IGNORECASE)
         )
+        if _blocking_unsupported_challenge(page):
+            raise UnsupportedChallenge("unsupported authentication challenge")
+        supported_control = (
+            ("username" not in completed and _visible(username))
+            or ("password" not in completed and _visible(password))
+            or ("totp" not in completed and _visible(totp))
+            or ("approval" not in completed and _button_visible(page, approval_names))
+        )
+        if not supported_control and UNSUPPORTED_TEXT.search(body_text):
+            if unsupported_candidate:
+                raise UnsupportedChallenge("unsupported authentication challenge")
+            unsupported_candidate = True
+            _wait_unsupported_candidate(page, deadline)
+            continue
+        unsupported_candidate = False
         if "username" not in completed and _visible(username):
             emit("username", "username", credentials.idp)
             username.fill(credentials.username, timeout=min(5_000, remaining_seconds(deadline) * 1_000))
@@ -423,7 +472,8 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
             completed.add("totp")
             _wait_page(page, deadline)
             continue
-        if _click(page, ("Confirm and continue", "Allow access", "Allow", "Approve"), deadline):
+        if "approval" not in completed and _click(page, approval_names, deadline):
+            completed.add("approval")
             emit("device_approve", "approval", credentials.idp)
             try:
                 page.wait_for_url(
