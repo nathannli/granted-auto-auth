@@ -13,7 +13,6 @@ See `docs/granted-auto-auth.md` for configuration, installation, and usage.
 An agent skill can check readiness with `granted-auto-browser enabled`, then run a profile-scoped command without exporting credentials:
 
 ```bash
-source ~/.config/bash-dot-files/config.bash
 assume <profile> --use-authorization-code --exec -- aws sts get-caller-identity
 ```
 
