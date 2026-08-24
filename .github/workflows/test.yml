@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            playwright-install: install chromium
+          - os: ubuntu-24.04
+            playwright-install: install --with-deps chromium
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: scripts/granted_auto_browser.py.lock
+      - name: Install Chromium
+        run: uv run --with playwright==1.62.0 playwright ${{ matrix.playwright-install }}
+      - name: Run core tests
+        run: uv run --with playwright==1.62.0 --with pyotp==2.10.0 python -m unittest discover -s tests
+      - name: Check whitespace
+        run: git diff --check
