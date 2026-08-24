@@ -115,6 +115,37 @@ granted settings set --setting DisableCredentialProcessCache --value false
 
 `install` changes only `CustomSSOBrowserPath`. It records the previous value so `uninstall` can restore it.
 
+#### How Granted configuration changes
+
+Granted stores its settings in `$HOME/.granted/config`. The controller does not rewrite that TOML file itself. It asks Granted to update one setting with the equivalent of:
+
+```sh
+granted settings set \
+  --setting CustomSSOBrowserPath \
+  --value /absolute/path/to/granted-auto-auth/scripts/granted_auto_browser.py
+```
+
+Granted then persists an absolute path like this:
+
+```toml
+CustomSSOBrowserPath = "/Users/alice/.config/granted-auto-auth/scripts/granted_auto_browser.py"
+```
+
+The exact home-directory prefix differs by operating system. The stored value is always expanded to an absolute path; `$HOME` and `~` are not written literally.
+
+The installation sequence is:
+
+1. Read the current `CustomSSOBrowserPath` from `$HOME/.granted/config`.
+2. Save that previous value in `$HOME/.config/granted-auto-auth/install.toml`.
+3. Provision the locked runtime and Chromium before changing Granted.
+4. Ask `granted settings set` to write the sidecar's absolute path.
+5. Read `$HOME/.granted/config` again and require the persisted value to match exactly.
+6. Mark the install state as configured only after verification succeeds.
+
+If installation fails after changing Granted, rollback restores the saved value. `uninstall` first marks its state as uninstalling, asks Granted to restore the saved `CustomSSOBrowserPath`, verifies the result, and only then removes `install.toml`. If another tool or user has changed `CustomSSOBrowserPath` since installation, `uninstall` refuses to overwrite that unrelated value.
+
+The controller only validates `UseAuthorizationCode` and `DisableCredentialProcessCache` during `doctor`; `install` does not change them. The explicit setup commands above remain user-controlled changes.
+
 ### 5. Install the browser runtime
 
 ```sh
