@@ -174,10 +174,15 @@ def rollback_install(previous: str) -> None:
     STATE_FILE.unlink(missing_ok=True)
 
 
-def provision_chromium() -> tuple[str, str]:
+def sync_sidecar_runtime() -> None:
     if not SIDECAR.is_file() or not LOCKFILE.is_file():
         raise ControllerError("sidecar or script lock is missing")
     run_checked(["uv", "lock", "--check", "--script", str(SIDECAR)])
+    run_checked(["uv", "sync", "--locked", "--script", str(SIDECAR)])
+
+
+def provision_chromium() -> tuple[str, str]:
+    sync_sidecar_runtime()
     run_checked(["uv", "run", "--with", f"playwright=={PLAYWRIGHT_VERSION}", "playwright", "install", "chromium"])
     probe = run_checked(
         [
@@ -227,6 +232,7 @@ def enabled() -> bool:
 
 def install() -> None:
     if enabled():
+        sync_sidecar_runtime()
         print("granted-auto-auth is already installed")
         return
     previous = recover_install_state()

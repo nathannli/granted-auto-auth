@@ -117,11 +117,23 @@ class ControllerTests(unittest.TestCase):
             controller, "recover_install_state"
         ) as recover, mock.patch.object(controller, "provision_chromium") as provision, mock.patch.object(
             controller, "set_custom_browser"
-        ) as set_browser:
+        ) as set_browser, mock.patch.object(controller, "sync_sidecar_runtime") as sync:
             controller.install()
+        sync.assert_called_once_with()
         recover.assert_not_called()
         provision.assert_not_called()
         set_browser.assert_not_called()
+
+    def test_sync_sidecar_runtime_uses_locked_script_environment(self) -> None:
+        with mock.patch.object(controller, "run_checked") as run:
+            controller.sync_sidecar_runtime()
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(["uv", "lock", "--check", "--script", str(self.sidecar)]),
+                mock.call(["uv", "sync", "--locked", "--script", str(self.sidecar)]),
+            ],
+        )
 
     def test_install_crash_recovers_from_each_phase(self) -> None:
         chromium = self.home / "chromium-1234/chrome"
