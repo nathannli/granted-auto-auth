@@ -301,13 +301,16 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(controller.ControllerError):
             controller.recover_install_state()
 
-    def test_legacy_profile_detection(self) -> None:
+    def test_v56_legacy_profile_detection_ignores_sso_sessions(self) -> None:
         self.aws_config.parent.mkdir(mode=0o700)
         self.aws_config.write_text(
+            "[sso-session modern]\nsso_start_url = https://example.awsapps.com/start\n"
+            "sso_region = us-east-1\n"
             "[profile legacy]\nsso_start_url = https://example.awsapps.com/start\n"
             "[profile modern]\nsso_session = modern\n"
+            "[default]\nsso_start_url = https://example.awsapps.com/start\n"
         )
-        self.assertEqual(controller._legacy_profiles(), ["legacy"])
+        self.assertEqual(controller._legacy_profiles(), ["legacy", "default"])
 
     def test_doctor_warns_for_container_device_flow(self) -> None:
         marker = self.home / ".dockerenv"

@@ -285,16 +285,23 @@ def _legacy_profiles() -> list[str]:
     has_start = False
     has_session = False
     for line in [*text.splitlines(), "[end]"]:
-        section = re.match(r"^\[(?:profile )?([^]]+)\]$", line.strip())
+        section = re.match(r"^\[([^]]+)\]$", line.strip())
         if section:
             if current and has_start and not has_session:
                 legacy.append(current)
-            current = section.group(1)
+            section_name = section.group(1)
+            profile = re.fullmatch(r"profile (.+)", section_name)
+            if section_name == "default":
+                current = "default"
+            elif profile:
+                current = profile.group(1)
+            else:
+                current = ""
             has_start = False
             has_session = False
-        elif re.match(r"^\s*sso_start_url\s*=", line):
+        elif current and re.match(r"^\s*sso_start_url\s*=", line):
             has_start = True
-        elif re.match(r"^\s*sso_session\s*=", line):
+        elif current and re.match(r"^\s*sso_session\s*=", line):
             has_session = True
     return legacy
 
