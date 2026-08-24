@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -247,11 +248,72 @@ def _linux_process_health() -> list[str]:
     return []
 
 
+def _busctl(arguments: list[str]) -> str:
+    executable = shutil.which("busctl")
+    if not executable:
+        raise ControllerError("busctl is unavailable")
+    try:
+        result = subprocess.run(
+            [executable, "--user", "--timeout=400ms", *arguments],
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=0.5,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        raise ControllerError("Secret Service D-Bus probe failed") from error
+    return result.stdout.strip()
+
+
+def _secret_service_process(pid: int) -> tuple[str, int]:
+    process = PROC_ROOT / str(pid)
+    return os.path.realpath(os.readlink(process / "exe")), process.stat().st_uid
+
+
+def _secret_service_health() -> list[str]:
+    try:
+        owner_output = _busctl(
+            ["call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", "s", "org.freedesktop.secrets"]
+        )
+    except ControllerError:
+        return ["Secret Service is unavailable"]
+    owner_match = re.fullmatch(r's\s+"(:[0-9.]+)"', owner_output)
+    if not owner_match:
+        return ["Secret Service owner response is invalid"]
+    owner = owner_match.group(1)
+    try:
+        pid_output = _busctl(
+            ["call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", owner]
+        )
+        pid_match = re.fullmatch(r"u\s+(\d+)", pid_output)
+        if not pid_match:
+            return ["Secret Service owner PID response is invalid"]
+        executable, uid = _secret_service_process(int(pid_match.group(1)))
+    except (ControllerError, OSError, ValueError):
+        return ["Secret Service owner process is unavailable"]
+    if Path(executable).name != "gnome-keyring-daemon" or uid != os.getuid():
+        return ["Secret Service owner is not the user gnome-keyring-daemon"]
+    try:
+        locked = _busctl(
+            ["get-property", owner, "/org/freedesktop/secrets/aliases/default", "org.freedesktop.Secret.Collection", "Locked"]
+        )
+    except ControllerError:
+        return ["Secret Service default collection is unavailable"]
+    if locked == "b true":
+        return ["Secret Service default collection is locked"]
+    if locked != "b false":
+        return ["Secret Service default collection lock response is invalid"]
+    return []
+
+
 def platform_health() -> list[str]:
     if sys.platform == "darwin":
         return _darwin_process_health()
     if sys.platform.startswith("linux"):
-        return _linux_process_health()
+        failures = _linux_process_health()
+        if failures:
+            return failures
+        return _secret_service_health()
     return [f"unsupported process platform: {sys.platform}"]
 
 

@@ -16,6 +16,7 @@ SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC
 controller = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(controller)
+real_platform_health = controller.platform_health
 
 
 class ControllerTests(unittest.TestCase):
@@ -42,6 +43,7 @@ class ControllerTests(unittest.TestCase):
             mock.patch.object(controller, "AWS_CONFIG", self.aws_config),
             mock.patch.object(controller, "SIDECAR", self.sidecar),
             mock.patch.object(controller, "LOCKFILE", self.lockfile),
+            mock.patch.object(controller, "platform_health", return_value=[]),
         )
         for patch in self.patches:
             patch.start()
@@ -99,7 +101,7 @@ class ControllerTests(unittest.TestCase):
         with mock.patch.object(controller.sys, "platform", "darwin"), mock.patch.object(
             controller, "_darwin_process_health", return_value=[]
         ) as probe:
-            self.assertEqual(controller.platform_health(), [])
+            self.assertEqual(real_platform_health(), [])
         probe.assert_called_once_with()
 
     def test_linux_platform_health_rejects_non_ubuntu(self) -> None:
@@ -107,6 +109,51 @@ class ControllerTests(unittest.TestCase):
         release.write_text('ID="fedora"\n')
         with mock.patch.object(controller, "OS_RELEASE", release):
             self.assertEqual(controller._linux_process_health(), ["unsupported Linux distribution: Ubuntu is required"])
+
+    def test_secret_service_health_accepts_unlocked_default_collection(self) -> None:
+        outputs = ['s ":1.42"', "u 1234", "b false"]
+        with mock.patch.object(controller, "_busctl", side_effect=outputs) as bus, mock.patch.object(
+            controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
+        ):
+            self.assertEqual(controller._secret_service_health(), [])
+        self.assertEqual(bus.call_count, 3)
+        self.assertEqual(bus.call_args_list[2].args[0][0], "get-property")
+        self.assertEqual(bus.call_args_list[2].args[0][1], ":1.42")
+
+    def test_secret_service_health_rejects_missing_service(self) -> None:
+        with mock.patch.object(controller, "_busctl", side_effect=controller.ControllerError("missing")):
+            self.assertEqual(controller._secret_service_health(), ["Secret Service is unavailable"])
+
+    def test_secret_service_health_rejects_wrong_owner(self) -> None:
+        with mock.patch.object(controller, "_busctl", side_effect=['s ":1.42"', "u 1234"]), mock.patch.object(
+            controller, "_secret_service_process", return_value=("/usr/bin/not-a-wallet", os.getuid())
+        ):
+            self.assertEqual(
+                controller._secret_service_health(), ["Secret Service owner is not the user gnome-keyring-daemon"]
+            )
+
+    def test_secret_service_health_rejects_missing_default_alias(self) -> None:
+        with mock.patch.object(
+            controller, "_busctl", side_effect=['s ":1.42"', "u 1234", controller.ControllerError("missing alias")]
+        ), mock.patch.object(
+            controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
+        ):
+            self.assertEqual(
+                controller._secret_service_health(), ["Secret Service default collection is unavailable"]
+            )
+
+    def test_secret_service_health_rejects_locked_default_collection(self) -> None:
+        with mock.patch.object(controller, "_busctl", side_effect=['s ":1.42"', "u 1234", "b true"]), mock.patch.object(
+            controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
+        ):
+            self.assertEqual(controller._secret_service_health(), ["Secret Service default collection is locked"])
+
+    def test_macos_platform_health_does_not_probe_secret_service(self) -> None:
+        with mock.patch.object(controller.sys, "platform", "darwin"), mock.patch.object(
+            controller, "_darwin_process_health", return_value=[]
+        ), mock.patch.object(controller, "_secret_service_health") as wallet:
+            self.assertEqual(real_platform_health(), [])
+        wallet.assert_not_called()
 
     def test_install_orders_browser_before_setting(self) -> None:
         chromium = self.home / "chromium-1234/chrome"
