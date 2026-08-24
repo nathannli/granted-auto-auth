@@ -68,6 +68,8 @@ SUCCESS_TEXT = re.compile(
     r"you can close (?:this )?(?:browser|window|tab)",
     re.IGNORECASE,
 )
+APPROVAL_BUTTON = re.compile(r"^(?:Confirm and continue|Allow access(?:\s+.*)?|Allow|Approve)$", re.IGNORECASE)
+APPROVAL_CONTEXT = re.compile(r"authoriz|access request|requested access|approve", re.IGNORECASE)
 
 
 class AutoAuthError(Exception):
@@ -430,6 +432,35 @@ def _click(page: Page, names: tuple[str, ...], deadline: int) -> bool:
     return False
 
 
+def _approval_visible(page: Page) -> bool:
+    button = _approval_button(page)
+    heading = page.get_by_role("heading").filter(has_text=APPROVAL_CONTEXT)
+    deny = page.get_by_role("button", name=re.compile(r"^Deny access$", re.IGNORECASE))
+    return button is not None and (_any_visible(heading) or _visible(deny))
+
+
+def _approval_button(page: Page):
+    named = page.get_by_role("button", name=APPROVAL_BUTTON)
+    if _visible(named):
+        return named
+    visible_text = page.get_by_role("button").filter(
+        has_text=re.compile(r"^\s*Allow access\s*$", re.IGNORECASE)
+    )
+    if _visible(visible_text):
+        return visible_text
+    return None
+
+
+def _click_approval(page: Page, deadline: int) -> bool:
+    button = _approval_button(page)
+    heading = page.get_by_role("heading").filter(has_text=APPROVAL_CONTEXT)
+    deny = page.get_by_role("button", name=re.compile(r"^Deny access$", re.IGNORECASE))
+    if button is None or not (_any_visible(heading) or _visible(deny)):
+        return False
+    button.click(timeout=min(5_000, remaining_seconds(deadline) * 1_000))
+    return True
+
+
 def _wait_page(page: Page, deadline: int) -> None:
     page.wait_for_timeout(min(500, max(50, remaining_seconds(deadline) * 1_000)))
     validate_redirect_url(page.url)
@@ -473,7 +504,6 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
     page.goto(page.url, wait_until="domcontentloaded", timeout=remaining_seconds(deadline) * 1_000)
     completed: set[str] = set()
     unsupported_candidate = False
-    approval_names = ("Confirm and continue", "Allow access", "Allow", "Approve")
     for _ in range(12):
         if remaining_seconds(deadline) < 0.05:
             raise AuthTimeout("not enough time for next browser action")
@@ -493,7 +523,7 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
             ("username" not in completed and _visible(username))
             or ("password" not in completed and _visible(password))
             or ("totp" not in completed and _visible(totp))
-            or ("approval" not in completed and _button_visible(page, approval_names))
+            or ("approval" not in completed and _approval_visible(page))
         )
         if not supported_control and UNSUPPORTED_TEXT.search(body_text):
             if unsupported_candidate:
@@ -533,7 +563,7 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
             completed.add("totp")
             _wait_page(page, deadline)
             continue
-        if "approval" not in completed and _click(page, approval_names, deadline):
+        if "approval" not in completed and _click_approval(page, deadline):
             completed.add("approval")
             emit("device_approve", "approval", credentials.idp)
             try:

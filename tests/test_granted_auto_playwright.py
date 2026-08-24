@@ -65,6 +65,12 @@ PAGES = {
         <p>A security key is another sign-in option.</p>
         <button onclick="sessionStorage.setItem('approval_count', Number(sessionStorage.getItem('approval_count') || 0) + 1); location='/oauth/callback'">Allow access</button>
     """,
+    "/approval-expanded-name": """
+        <h1>AWS access request</h1>
+        <button>Show details</button>
+        <button>Deny access</button>
+        <button aria-label="Grant requested permissions to the application" onclick="location='/oauth/callback'">Allow access</button>
+    """,
     "/authentication-status": """
         <h1>Authentication Status</h1>
         <script>setTimeout(() => location='/oauth/callback', 1000)</script>
@@ -162,6 +168,9 @@ class PlaywrightFixtureTests(unittest.TestCase):
     def test_existing_session_starts_at_approval(self) -> None:
         self.run_flow("/approval")
 
+    def test_approval_accepts_visible_text_with_deny_control(self) -> None:
+        self.run_flow("/approval-expanded-name")
+
     def test_delayed_callback_waits_after_approval(self) -> None:
         self.run_flow("/approval-delayed")
 
@@ -206,7 +215,7 @@ class PlaywrightFixtureTests(unittest.TestCase):
         page = self.browser.new_page()
         try:
             page.goto(self.base + "/approval")
-            with mock.patch.object(sidecar, "_click", side_effect=sidecar.AutoAuthError("adapter failure")):
+            with mock.patch.object(sidecar, "_click_approval", side_effect=sidecar.AutoAuthError("adapter failure")):
                 with self.assertRaisesRegex(sidecar.AutoAuthError, "adapter failure"):
                     sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 5_000_000_000)
         finally:

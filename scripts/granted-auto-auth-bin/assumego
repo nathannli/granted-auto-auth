@@ -25,7 +25,7 @@ def main() -> int:
     if time.monotonic_ns() >= deadline:
         print("granted-auto-auth: authentication deadline expired", file=sys.stderr)
         return 124
-    process = subprocess.Popen([real, *sys.argv[1:]], start_new_session=True)
+    process = subprocess.Popen(["assumego", *sys.argv[1:]], executable=real, start_new_session=True)
 
     def forward(sig: int, _frame: object) -> None:
         try:
