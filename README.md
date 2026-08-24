@@ -8,13 +8,13 @@ Supported systems:
 - Ubuntu with Fish
 - Ubuntu with Bash
 
-## Install
-
-Requirements: 
+## Requirements
 - [uv](https://docs.astral.sh/uv/), 
 - Granted v0.39.x
 - a compatible Fish or Bash `assume` adapter. 
 - On Ubuntu, the user's D-Bus session must expose an unlocked default Secret Service collection owned by `gnome-keyring-daemon`.
+
+## Install
 
 Clone the repository into its expected configuration directory:
 
