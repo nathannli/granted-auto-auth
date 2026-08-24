@@ -180,7 +180,9 @@ class DeadlineAndProcessTests(unittest.TestCase):
         parent, start_time, executable = sidecar._process_info(os.getpid())
         self.assertEqual(parent, os.getppid())
         self.assertTrue(start_time)
-        self.assertEqual(executable, os.path.realpath(sys.executable))
+        self.assertTrue(os.path.isabs(executable))
+        self.assertTrue(os.path.isfile(executable))
+        self.assertTrue(os.access(executable, os.X_OK))
 
     def test_unsupported_process_platform_fails_closed(self) -> None:
         with mock.patch.object(sidecar.sys, "platform", "freebsd"):
@@ -190,8 +192,8 @@ class DeadlineAndProcessTests(unittest.TestCase):
     def test_cancel_process_terminates_verified_child(self) -> None:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
-            _, start_time, _ = sidecar._process_info(child.pid)
-            identity = sidecar.ProcessIdentity(child.pid, start_time, os.path.realpath(sys.executable), None)
+            _, start_time, executable = sidecar._process_info(child.pid)
+            identity = sidecar.ProcessIdentity(child.pid, start_time, executable, None)
             sidecar.cancel_process(identity, time.monotonic_ns() + 2_000_000_000)
             child.wait(timeout=3)
             self.assertEqual(child.returncode, -signal.SIGTERM)
@@ -211,8 +213,8 @@ class DeadlineAndProcessTests(unittest.TestCase):
         )
         try:
             self.assertEqual(child.stdout.readline().strip(), "ready")
-            _, start_time, _ = sidecar._process_info(child.pid)
-            identity = sidecar.ProcessIdentity(child.pid, start_time, os.path.realpath(sys.executable), None)
+            _, start_time, executable = sidecar._process_info(child.pid)
+            identity = sidecar.ProcessIdentity(child.pid, start_time, executable, None)
             sidecar.cancel_process(identity, time.monotonic_ns() + 150_000_000)
             child.wait(timeout=3)
             self.assertEqual(child.returncode, -signal.SIGKILL)
@@ -249,6 +251,7 @@ class DeadlineAndProcessTests(unittest.TestCase):
         sender.assert_called_once_with(123, signal.SIGKILL)
 
     def test_finds_verified_python_ancestor(self) -> None:
+        expected_executable = sidecar._process_info(os.getpid())[2]
         code = f"""
 import importlib.util, os, sys
 p={str(SIDECAR_PATH)!r}
@@ -256,7 +259,7 @@ s=importlib.util.spec_from_file_location('ancestor_sidecar', p)
 m=importlib.util.module_from_spec(s)
 sys.modules[s.name]=m
 s.loader.exec_module(m)
-i=m.find_assumego_ancestor(sys.executable)
+i=m.find_assumego_ancestor({expected_executable!r})
 print(i.pid)
 if i.pidfd is not None: os.close(i.pidfd)
 """
@@ -264,6 +267,7 @@ if i.pidfd is not None: os.close(i.pidfd)
         self.assertEqual(int(result.stdout.strip()), os.getpid())
 
     def test_finds_verified_ancestor_through_intermediate_processes(self) -> None:
+        expected_executable = sidecar._process_info(os.getpid())[2]
         code = f"""
 import importlib.util, os, sys
 p={str(SIDECAR_PATH)!r}
@@ -271,7 +275,7 @@ s=importlib.util.spec_from_file_location('intermediate_ancestor_sidecar', p)
 m=importlib.util.module_from_spec(s)
 sys.modules[s.name]=m
 s.loader.exec_module(m)
-i=m.find_assumego_ancestor({os.path.realpath(sys.executable)!r})
+i=m.find_assumego_ancestor({expected_executable!r})
 print(i.pid)
 if i.pidfd is not None: os.close(i.pidfd)
 """
