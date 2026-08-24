@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import fcntl
+import ctypes
+import functools
 import json
 import os
 import re
@@ -101,6 +103,33 @@ class ProcessIdentity:
     start_time: str
     executable: str
     pidfd: int | None
+
+
+class _DarwinBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
 
 
 def emit(event: str, stage: str, adapter: str = "aws_identity_center") -> None:
@@ -251,6 +280,40 @@ def _proc_stat(pid: int) -> tuple[int, str]:
     return int(tail[1]), tail[19]
 
 
+@functools.lru_cache(maxsize=1)
+def _darwin_libproc() -> ctypes.CDLL:
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    library.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    library.proc_pidinfo.restype = ctypes.c_int
+    library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    library.proc_pidpath.restype = ctypes.c_int
+    return library
+
+
+def _darwin_process_info(pid: int) -> tuple[int, str, str]:
+    library = _darwin_libproc()
+    info = _DarwinBSDInfo()
+    size = ctypes.sizeof(info)
+    if library.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
+        raise ProcessLookupError(pid)
+    path = ctypes.create_string_buffer(4096)
+    if library.proc_pidpath(pid, path, len(path)) <= 0:
+        raise ProcessLookupError(pid)
+    executable = os.path.realpath(os.fsdecode(path.value))
+    start_time = f"{info.pbi_start_tvsec}:{info.pbi_start_tvusec}"
+    return int(info.pbi_ppid), start_time, executable
+
+
+def _process_info(pid: int) -> tuple[int, str, str]:
+    if sys.platform.startswith("linux"):
+        parent, start_time = _proc_stat(pid)
+        executable = os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
+        return parent, start_time, executable
+    if sys.platform == "darwin":
+        return _darwin_process_info(pid)
+    raise SetupError(f"unsupported process platform: {sys.platform}")
+
+
 def find_assumego_ancestor(expected_executable: str | None = None) -> ProcessIdentity:
     expected = os.path.realpath(expected_executable or os.environ.get("GRANTED_AUTO_AUTH_REAL_ASSUMEGO", ""))
     if not expected or not os.path.isfile(expected) or not os.access(expected, os.X_OK):
@@ -258,13 +321,12 @@ def find_assumego_ancestor(expected_executable: str | None = None) -> ProcessIde
     pid = os.getppid()
     while pid > 1:
         try:
-            parent, start_time = _proc_stat(pid)
-            executable = os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
+            parent, start_time, executable = _process_info(pid)
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             break
         if executable == expected:
             try:
-                pidfd = os.pidfd_open(pid) if hasattr(os, "pidfd_open") else None
+                pidfd = os.pidfd_open(pid) if sys.platform.startswith("linux") and hasattr(os, "pidfd_open") else None
             except OSError:
                 pidfd = None
             return ProcessIdentity(pid, start_time, executable, pidfd)
@@ -274,8 +336,7 @@ def find_assumego_ancestor(expected_executable: str | None = None) -> ProcessIde
 
 def process_matches(identity: ProcessIdentity) -> bool:
     try:
-        _, start_time = _proc_stat(identity.pid)
-        executable = os.path.realpath(os.readlink(f"/proc/{identity.pid}/exe"))
+        _, start_time, executable = _process_info(identity.pid)
     except (FileNotFoundError, PermissionError, ProcessLookupError):
         return False
     return start_time == identity.start_time and executable == identity.executable

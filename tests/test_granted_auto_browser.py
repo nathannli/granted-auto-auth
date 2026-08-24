@@ -172,14 +172,25 @@ class DeadlineAndProcessTests(unittest.TestCase):
         self.assertFalse(sidecar.process_matches(identity))
 
     def test_process_identity_rejects_wrong_executable(self) -> None:
-        _, start_time = sidecar._proc_stat(os.getpid())
+        _, start_time, _ = sidecar._process_info(os.getpid())
         identity = sidecar.ProcessIdentity(os.getpid(), start_time, os.path.realpath("/bin/true"), None)
         self.assertFalse(sidecar.process_matches(identity))
+
+    def test_process_backend_reports_current_process(self) -> None:
+        parent, start_time, executable = sidecar._process_info(os.getpid())
+        self.assertEqual(parent, os.getppid())
+        self.assertTrue(start_time)
+        self.assertEqual(executable, os.path.realpath(sys.executable))
+
+    def test_unsupported_process_platform_fails_closed(self) -> None:
+        with mock.patch.object(sidecar.sys, "platform", "freebsd"):
+            with self.assertRaisesRegex(sidecar.SetupError, "unsupported process platform"):
+                sidecar._process_info(os.getpid())
 
     def test_cancel_process_terminates_verified_child(self) -> None:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
-            _, start_time = sidecar._proc_stat(child.pid)
+            _, start_time, _ = sidecar._process_info(child.pid)
             identity = sidecar.ProcessIdentity(child.pid, start_time, os.path.realpath(sys.executable), None)
             sidecar.cancel_process(identity, time.monotonic_ns() + 2_000_000_000)
             child.wait(timeout=3)
@@ -200,7 +211,7 @@ class DeadlineAndProcessTests(unittest.TestCase):
         )
         try:
             self.assertEqual(child.stdout.readline().strip(), "ready")
-            _, start_time = sidecar._proc_stat(child.pid)
+            _, start_time, _ = sidecar._process_info(child.pid)
             identity = sidecar.ProcessIdentity(child.pid, start_time, os.path.realpath(sys.executable), None)
             sidecar.cancel_process(identity, time.monotonic_ns() + 150_000_000)
             child.wait(timeout=3)
@@ -260,17 +271,16 @@ s=importlib.util.spec_from_file_location('intermediate_ancestor_sidecar', p)
 m=importlib.util.module_from_spec(s)
 sys.modules[s.name]=m
 s.loader.exec_module(m)
-i=m.find_assumego_ancestor('/bin/bash')
+i=m.find_assumego_ancestor({os.path.realpath(sys.executable)!r})
 print(i.pid)
 if i.pidfd is not None: os.close(i.pidfd)
 """
-        inner = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} & wait"
-        outer = f"/bin/sh -c {shlex.quote(inner)} & wait"
-        process = subprocess.Popen(["/bin/bash", "-c", outer], stdout=subprocess.PIPE, text=True)
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+        process = subprocess.Popen(["/bin/sh", "-c", command], stdout=subprocess.PIPE, text=True)
         try:
             output, _ = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 0)
-            self.assertEqual(int(output.strip()), process.pid)
+            self.assertEqual(int(output.strip()), os.getpid())
         finally:
             if process.poll() is None:
                 process.kill()
