@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -24,6 +25,8 @@ CREDENTIALS_FILE = STATE_DIR / "credentials.toml"
 GRANTED_CONFIG = Path.home() / ".granted/config"
 AWS_CONFIG = Path.home() / ".aws/config"
 CONTAINER_MARKER = Path("/.dockerenv")
+OS_RELEASE = Path("/etc/os-release")
+PROC_ROOT = Path("/proc")
 
 
 class ControllerError(Exception):
@@ -206,6 +209,52 @@ def provision_chromium() -> tuple[str, str]:
     return chromium, revision
 
 
+def _darwin_process_health() -> list[str]:
+    try:
+        library = ctypes.CDLL("/usr/lib/libproc.dylib")
+        library.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        library.proc_pidinfo.restype = ctypes.c_int
+        library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        library.proc_pidpath.restype = ctypes.c_int
+        info = ctypes.create_string_buffer(136)
+        path = ctypes.create_string_buffer(4096)
+        if library.proc_pidinfo(os.getpid(), 3, 0, info, len(info)) != len(info):
+            return ["Darwin libproc process-info probe failed"]
+        if library.proc_pidpath(os.getpid(), path, len(path)) <= 0:
+            return ["Darwin libproc process-path probe failed"]
+    except (AttributeError, OSError):
+        return ["Darwin libproc process backend is unavailable"]
+    return []
+
+
+def _linux_process_health() -> list[str]:
+    try:
+        release = OS_RELEASE.read_text()
+        distro = next(
+            (line.split("=", 1)[1].strip().strip('"') for line in release.splitlines() if line.startswith("ID=")), ""
+        )
+        if distro != "ubuntu":
+            return ["unsupported Linux distribution: Ubuntu is required"]
+        raw = (PROC_ROOT / "self/stat").read_text()
+        tail = raw[raw.rfind(")") + 2 :].split()
+        if len(tail) < 20 or int(tail[1]) < 0 or not tail[19]:
+            return ["Linux /proc process-info probe failed"]
+        executable = os.path.realpath(os.readlink(PROC_ROOT / "self/exe"))
+        if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+            return ["Linux /proc process-path probe failed"]
+    except (OSError, ValueError):
+        return ["Linux /proc process backend is unavailable"]
+    return []
+
+
+def platform_health() -> list[str]:
+    if sys.platform == "darwin":
+        return _darwin_process_health()
+    if sys.platform.startswith("linux"):
+        return _linux_process_health()
+    return [f"unsupported process platform: {sys.platform}"]
+
+
 def enabled() -> bool:
     try:
         state = read_secure_toml(STATE_FILE)
@@ -224,6 +273,7 @@ def enabled() -> bool:
                 f"chromium-{revision}" in chromium,
                 Path(chromium).is_file(),
                 os.access(chromium, os.X_OK),
+                not platform_health(),
             )
         )
     except (ControllerError, FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError):
@@ -326,6 +376,7 @@ def doctor() -> int:
             failures.append("DisableCredentialProcessCache must be false")
     except ControllerError as error:
         failures.append(str(error))
+    failures.extend(platform_health())
     if not enabled():
         failures.append("installation is not enabled")
     browser_dir = Path.home() / ".local/share/granted-auto-auth/browser"

@@ -85,6 +85,29 @@ class ControllerTests(unittest.TestCase):
         controller.write_state({"phase": "chromium_ready"})
         self.assertFalse(controller.enabled())
 
+    def test_enabled_rejects_unsupported_process_backend(self) -> None:
+        chromium = self.home / "chromium-1234/chrome"
+        chromium.parent.mkdir()
+        chromium.write_text("binary")
+        chromium.chmod(0o755)
+        controller.write_state(self.configured_state(chromium))
+        self.write_config(str(self.sidecar))
+        with mock.patch.object(controller, "platform_health", return_value=["unsupported process platform: plan9"]):
+            self.assertFalse(controller.enabled())
+
+    def test_platform_health_dispatches_to_darwin(self) -> None:
+        with mock.patch.object(controller.sys, "platform", "darwin"), mock.patch.object(
+            controller, "_darwin_process_health", return_value=[]
+        ) as probe:
+            self.assertEqual(controller.platform_health(), [])
+        probe.assert_called_once_with()
+
+    def test_linux_platform_health_rejects_non_ubuntu(self) -> None:
+        release = self.home / "os-release"
+        release.write_text('ID="fedora"\n')
+        with mock.patch.object(controller, "OS_RELEASE", release):
+            self.assertEqual(controller._linux_process_health(), ["unsupported Linux distribution: Ubuntu is required"])
+
     def test_install_orders_browser_before_setting(self) -> None:
         chromium = self.home / "chromium-1234/chrome"
         chromium.parent.mkdir()
@@ -333,10 +356,26 @@ class ControllerTests(unittest.TestCase):
             controller, "granted_config", return_value={"UseAuthorizationCode": True, "DisableCredentialProcessCache": False}
         ), mock.patch.object(controller, "enabled", return_value=True), mock.patch.object(
             controller, "_legacy_profiles", return_value=[]
+        ), mock.patch.object(
+            controller, "platform_health", return_value=[]
         ), mock.patch("builtins.print") as output:
             self.assertEqual(controller.doctor(), 0)
         messages = [call.args[0] for call in output.call_args_list]
         self.assertIn("WARN: container detected: Granted may use device flow with legacy scopes", messages)
+
+    def test_doctor_reports_platform_backend_failure(self) -> None:
+        with mock.patch.object(controller, "_credential_health", return_value=[]), mock.patch.object(
+            controller, "run_checked", return_value=mock.Mock(stdout="Granted 0.39.2")
+        ), mock.patch.object(
+            controller, "granted_config", return_value={"UseAuthorizationCode": True, "DisableCredentialProcessCache": False}
+        ), mock.patch.object(controller, "enabled", return_value=True), mock.patch.object(
+            controller, "_legacy_profiles", return_value=[]
+        ), mock.patch.object(
+            controller, "platform_health", return_value=["unsupported process platform: plan9"]
+        ), mock.patch("builtins.print") as output:
+            self.assertEqual(controller.doctor(), 1)
+        messages = [call.args[0] for call in output.call_args_list]
+        self.assertIn("FAIL: unsupported process platform: plan9", messages)
 
     def test_unknown_command_returns_usage(self) -> None:
         self.assertEqual(controller.main(["unknown"]), 2)
