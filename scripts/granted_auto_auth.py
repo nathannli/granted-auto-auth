@@ -613,7 +613,7 @@ def close_identity(identity: ProcessIdentity | None) -> None:
 def main(argv: list[str]) -> int:
     # TODO: Revisit URL transport when Granted supports a non-argv custom-browser handoff.
     if len(argv) != 1:
-        print("usage: granted_auto_browser.py <authorization-url>", file=sys.stderr)
+        print("usage: granted_auto_auth.py <authorization-url>", file=sys.stderr)
         return EXIT_USAGE
     identity: ProcessIdentity | None = None
     lock_descriptor: int | None = None

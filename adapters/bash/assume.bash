@@ -1,6 +1,6 @@
 # Sources the bash assume wrapper from granted (mirrors fish's source $ASSUME_PATH/assume.fish)
 assume() {
-	local controller="$HOME/.config/granted-auto-auth/scripts/granted-auto-browser"
+	local controller="$HOME/.config/granted-auto-auth/scripts/granted-auto-auth"
 	local shim_path="$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin"
 	local resolved_assumego
 	resolved_assumego="$(command -v assumego)" || {
@@ -90,7 +90,7 @@ granted-auto-auth-doctor() {
 		echo "FAIL: unsupported platform: $os/$distro/bash"
 		return 1
 	fi
-	local controller="$HOME/.config/granted-auto-auth/scripts/granted-auto-browser"
+	local controller="$HOME/.config/granted-auto-auth/scripts/granted-auto-auth"
 	if [[ ! -x "$controller" ]] || ! "$controller" doctor; then
 		echo "FAIL: core doctor failed"
 		return 1

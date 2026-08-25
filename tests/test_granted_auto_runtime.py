@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SIDECAR = ROOT / "scripts/granted_auto_browser.py"
-LOCKFILE = ROOT / "scripts/granted_auto_browser.py.lock"
+SIDECAR = ROOT / "scripts/granted_auto_auth.py"
+LOCKFILE = ROOT / "scripts/granted_auto_auth.py.lock"
 
 
 class LockedRuntimeTests(unittest.TestCase):

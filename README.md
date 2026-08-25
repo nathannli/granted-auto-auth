@@ -68,13 +68,13 @@ source "$HOME/.bashrc"
 Verify the resolved command:
 
 ```sh
-command -v granted-auto-browser
+command -v granted-auto-auth
 ```
 
 It should resolve to:
 
 ```text
-$HOME/.config/granted-auto-auth/scripts/granted-auto-browser
+$HOME/.config/granted-auto-auth/scripts/granted-auto-auth
 ```
 
 ### 3. Create the credential file
@@ -124,13 +124,13 @@ Granted stores its settings in `$HOME/.granted/config`. The controller does not 
 ```sh
 granted settings set \
   --setting CustomSSOBrowserPath \
-  --value /absolute/path/to/granted-auto-auth/scripts/granted_auto_browser.py
+  --value /absolute/path/to/granted-auto-auth/scripts/granted_auto_auth.py
 ```
 
 Granted then persists an absolute path like this:
 
 ```toml
-CustomSSOBrowserPath = "/Users/alice/.config/granted-auto-auth/scripts/granted_auto_browser.py"
+CustomSSOBrowserPath = "/Users/alice/.config/granted-auto-auth/scripts/granted_auto_auth.py"
 ```
 
 The exact home-directory prefix differs by operating system. The stored value is always expanded to an absolute path; `$HOME` and `~` are not written literally.
@@ -151,8 +151,8 @@ The controller only validates `UseAuthorizationCode` and `DisableCredentialProce
 ### 5. Install the browser runtime
 
 ```sh
-granted-auto-browser install
-granted-auto-browser doctor
+granted-auto-auth install
+granted-auto-auth doctor
 ```
 
 `install` verifies the locked PEP 723 environment, downloads the exact Playwright Chromium revision, writes `$HOME/.config/granted-auto-auth/install.toml`, and configures the sidecar as Granted's custom SSO browser. A successful doctor ends with:
@@ -166,7 +166,7 @@ OK: granted-auto-auth is ready
 Adding `scripts` to `PATH` exposes the controller. Sourcing the matching bundled adapter defines `assume` and `granted-auto-auth-doctor` in the current shell. Confirm both layers:
 
 ```sh
-granted-auto-browser doctor
+granted-auto-auth doctor
 granted-auto-auth-doctor
 ```
 
@@ -201,7 +201,7 @@ Personal profile aliases such as `aprod` or `sprod`, SSH/SSM helpers, and the im
 Syntax:
 
 ```text
-granted-auto-browser doctor|enabled|install|uninstall
+granted-auto-auth doctor|enabled|install|uninstall
 ```
 
 The controller accepts one command. It has no short options, long options, positional values, or combined commands.
@@ -209,7 +209,7 @@ The controller accepts one command. It has no short options, long options, posit
 ### `install`
 
 ```sh
-granted-auto-browser install
+granted-auto-auth install
 ```
 
 - Requires network access for initial dependency and Chromium installation.
@@ -225,7 +225,7 @@ granted-auto-browser install
 ### `enabled`
 
 ```sh
-granted-auto-browser enabled
+granted-auto-auth enabled
 ```
 
 Silent and authentication-free. It returns `0` only when all of these are healthy:
@@ -241,7 +241,7 @@ It returns `1` for disabled, incomplete, stale, unsupported, or unhealthy state.
 ### `doctor`
 
 ```sh
-granted-auto-browser doctor
+granted-auto-auth doctor
 ```
 
 Runs authentication-free diagnostics for:
@@ -261,7 +261,7 @@ Runs authentication-free diagnostics for:
 ### `uninstall`
 
 ```sh
-granted-auto-browser uninstall
+granted-auto-auth uninstall
 ```
 
 - Refuses to overwrite a Granted browser setting that no longer matches this installation.
@@ -317,8 +317,8 @@ A valid Granted cache returns immediately without launching Chromium. An expired
 | `$HOME/.config/granted-auto-auth/install.toml` | Installation phase, previous browser setting, and Chromium identity. | Yes |
 | `$HOME/.local/share/granted-auto-auth/browser/` | Persistent dedicated Chromium profile. | No |
 | `$HOME/.local/share/granted-auto-auth/browser.lock` | Single-browser-process lock. | No |
-| `$HOME/.config/granted-auto-auth/scripts/granted-auto-browser` | Public controller command. | No |
-| `$HOME/.config/granted-auto-auth/scripts/granted_auto_browser.py` | Granted custom-browser sidecar; internal. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth` | Public controller command. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted_auto_auth.py` | Granted custom-browser sidecar; internal. | No |
 | `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin/assumego` | Deadline shim; internal. | No |
 | `$HOME/.config/granted-auto-auth/adapters/fish/assume.fish` | Generic Fish `assume` integration. | No |
 | `$HOME/.config/granted-auto-auth/adapters/bash/assume.bash` | Generic Ubuntu Bash `assume` integration. | No |
@@ -352,12 +352,12 @@ Containers may cause Granted to fall back to device flow. The controller reports
 Start with:
 
 ```sh
-granted-auto-browser doctor
+granted-auto-auth doctor
 ```
 
 Common results:
 
-- `installation is not enabled`: run `granted-auto-browser install`, then rerun doctor.
+- `installation is not enabled`: run `granted-auto-auth install`, then rerun doctor.
 - `Granted v0.39.x is required`: install a supported Granted release.
 - `UseAuthorizationCode must be true`: set the Granted setting shown in the installation section.
 - `DisableCredentialProcessCache must be false`: re-enable Granted's cache with the setting shown above.

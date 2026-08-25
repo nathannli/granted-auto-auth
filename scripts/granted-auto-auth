@@ -18,8 +18,8 @@ from pathlib import Path
 PLAYWRIGHT_VERSION = "1.62.0"
 CONTROLLER = Path(__file__).resolve()
 SCRIPTS_DIR = CONTROLLER.parent
-SIDECAR = SCRIPTS_DIR / "granted_auto_browser.py"
-LOCKFILE = SCRIPTS_DIR / "granted_auto_browser.py.lock"
+SIDECAR = SCRIPTS_DIR / "granted_auto_auth.py"
+LOCKFILE = SCRIPTS_DIR / "granted_auto_auth.py.lock"
 STATE_DIR = Path.home() / ".config/granted-auto-auth"
 STATE_FILE = STATE_DIR / "install.toml"
 CREDENTIALS_FILE = STATE_DIR / "credentials.toml"
@@ -144,11 +144,39 @@ def base_state(previous: str) -> dict[str, object]:
     }
 
 
+def _owned_sidecar_path(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    path = Path(value)
+    return path.is_absolute() and path.parent == SCRIPTS_DIR and path.name.startswith("granted_auto_") and path.suffix == ".py"
+
+
+def migrate_install_state() -> bool:
+    if not STATE_FILE.exists():
+        return False
+    state = read_secure_toml(STATE_FILE)
+    executable = state.get("executable_path")
+    if executable == str(SIDECAR):
+        return False
+    if state.get("phase") != "configured" or not _owned_sidecar_path(executable):
+        return False
+    current = custom_sso_browser_path()
+    if current not in {executable, str(SIDECAR)}:
+        raise ControllerError("configured install state does not match Granted")
+    sync_sidecar_runtime()
+    if current != str(SIDECAR):
+        set_custom_browser(str(SIDECAR))
+    state["executable_path"] = str(SIDECAR)
+    write_state(state)
+    return enabled()
+
+
 def recover_install_state() -> str:
     if not STATE_FILE.exists():
         return custom_sso_browser_path()
     state = read_secure_toml(STATE_FILE)
-    if state.get("executable_path") != str(SIDECAR):
+    executable = state.get("executable_path")
+    if executable != str(SIDECAR) and not _owned_sidecar_path(executable):
         raise ControllerError("install state belongs to another executable")
     previous = state.get("previous_browser_path")
     if not isinstance(previous, str):
@@ -156,12 +184,12 @@ def recover_install_state() -> str:
     current = custom_sso_browser_path()
     phase = state.get("phase")
     if phase == "configured":
-        if current != str(SIDECAR):
+        if current != executable:
             raise ControllerError("configured install state does not match Granted")
         return previous
     if phase not in {"prepared", "chromium_ready", "uninstalling"}:
         raise ControllerError("install state phase is invalid")
-    if current == str(SIDECAR):
+    if current == executable:
         set_custom_browser(previous)
     elif current != previous:
         raise ControllerError("partial install conflicts with Granted browser setting")
@@ -347,6 +375,9 @@ def install() -> None:
         sync_sidecar_runtime()
         print("granted-auto-auth is already installed")
         return
+    if migrate_install_state():
+        print("granted-auto-auth installation migrated")
+        return
     previous = recover_install_state()
     state = base_state(previous)
     write_state(state)
@@ -369,7 +400,7 @@ def install() -> None:
 def uninstall() -> None:
     state = read_secure_toml(STATE_FILE)
     expected = state.get("executable_path")
-    if expected != str(SIDECAR) or custom_sso_browser_path() != str(SIDECAR):
+    if not _owned_sidecar_path(expected) or custom_sso_browser_path() != expected:
         raise ControllerError("refusing to overwrite unrelated Granted browser setting")
     state["phase"] = "uninstalling"
     write_state(state)
@@ -461,7 +492,7 @@ def doctor() -> int:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in {"doctor", "enabled", "install", "uninstall"}:
-        print("usage: granted-auto-browser doctor|enabled|install|uninstall", file=sys.stderr)
+        print("usage: granted-auto-auth doctor|enabled|install|uninstall", file=sys.stderr)
         return 2
     command = argv[0]
     try:
@@ -475,7 +506,7 @@ def main(argv: list[str]) -> int:
             uninstall()
         return 0
     except (ControllerError, FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError) as error:
-        print(f"granted-auto-browser: {error}", file=sys.stderr)
+        print(f"granted-auto-auth: {error}", file=sys.stderr)
         return 1
 
 

@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: scripts/granted_auto_browser.py.lock
+          cache-dependency-glob: scripts/granted_auto_auth.py.lock
       - name: Install Chromium
         run: uv run --with playwright==1.62.0 playwright ${{ matrix.playwright-install }}
       - name: Run core tests

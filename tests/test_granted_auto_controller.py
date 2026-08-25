@@ -10,7 +10,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTROLLER_PATH = ROOT / "scripts/granted-auto-browser"
+CONTROLLER_PATH = ROOT / "scripts/granted-auto-auth"
 LOADER = importlib.machinery.SourceFileLoader("granted_auto_controller", str(CONTROLLER_PATH))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC
@@ -27,8 +27,8 @@ class ControllerTests(unittest.TestCase):
         self.state_file = self.state_dir / "install.toml"
         self.granted_config = self.home / ".granted/config"
         self.aws_config = self.home / ".aws/config"
-        self.sidecar = self.home / "repo/granted_auto_browser.py"
-        self.lockfile = self.home / "repo/granted_auto_browser.py.lock"
+        self.sidecar = self.home / "repo/granted_auto_auth.py"
+        self.lockfile = self.home / "repo/granted_auto_auth.py.lock"
         self.sidecar.parent.mkdir(parents=True)
         self.sidecar.write_text("#!/bin/sh\n")
         self.sidecar.chmod(0o755)
@@ -41,6 +41,7 @@ class ControllerTests(unittest.TestCase):
             mock.patch.object(controller, "CREDENTIALS_FILE", self.state_dir / "credentials.toml"),
             mock.patch.object(controller, "GRANTED_CONFIG", self.granted_config),
             mock.patch.object(controller, "AWS_CONFIG", self.aws_config),
+            mock.patch.object(controller, "SCRIPTS_DIR", self.sidecar.parent),
             mock.patch.object(controller, "SIDECAR", self.sidecar),
             mock.patch.object(controller, "LOCKFILE", self.lockfile),
             mock.patch.object(controller, "platform_health", return_value=[]),
@@ -193,6 +194,28 @@ class ControllerTests(unittest.TestCase):
         recover.assert_not_called()
         provision.assert_not_called()
         set_browser.assert_not_called()
+
+    def test_install_migrates_owned_sidecar_path(self) -> None:
+        legacy_sidecar = self.sidecar.parent / "granted_auto_legacy.py"
+        chromium = self.home / "chromium-1234/chrome"
+        chromium.parent.mkdir()
+        chromium.write_text("binary")
+        chromium.chmod(0o755)
+        state = self.configured_state(chromium)
+        state["executable_path"] = str(legacy_sidecar)
+        controller.write_state(state)
+        self.write_config(str(legacy_sidecar))
+
+        def set_browser(value: str) -> None:
+            self.write_config(value)
+
+        with mock.patch.object(controller, "sync_sidecar_runtime") as sync, mock.patch.object(
+            controller, "set_custom_browser", side_effect=set_browser
+        ):
+            controller.install()
+        sync.assert_called_once_with()
+        self.assertEqual(controller.custom_sso_browser_path(), str(self.sidecar))
+        self.assertEqual(controller.read_secure_toml(self.state_file)["executable_path"], str(self.sidecar))
 
     def test_sync_sidecar_runtime_uses_locked_script_environment(self) -> None:
         with mock.patch.object(controller, "run_checked") as run:

@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIM = ROOT / "scripts/granted-auto-auth-bin/assumego"
-SIDECAR = ROOT / "scripts/granted_auto_browser.py"
+SIDECAR = ROOT / "scripts/granted_auto_auth.py"
 
 
 class ShimTests(unittest.TestCase):

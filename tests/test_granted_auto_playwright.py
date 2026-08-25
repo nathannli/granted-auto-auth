@@ -12,8 +12,8 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SIDECAR_PATH = ROOT / "scripts/granted_auto_browser.py"
-SPEC = importlib.util.spec_from_file_location("granted_auto_browser_fixture", SIDECAR_PATH)
+SIDECAR_PATH = ROOT / "scripts/granted_auto_auth.py"
+SPEC = importlib.util.spec_from_file_location("granted_auto_auth_fixture", SIDECAR_PATH)
 assert SPEC and SPEC.loader
 sidecar = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = sidecar

@@ -1,5 +1,5 @@
 function assume
-    set -l controller "$HOME/.config/granted-auto-auth/scripts/granted-auto-browser"
+    set -l controller "$HOME/.config/granted-auto-auth/scripts/granted-auto-auth"
     set -l shim_path "$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin"
     set -l resolved_assumego (command -s assumego)
     if test -z "$resolved_assumego"
@@ -90,7 +90,7 @@ function granted-auto-auth-doctor
         echo "FAIL: unsupported platform: $os/$distro/fish"
         return 1
     end
-    set -l controller "$HOME/.config/granted-auto-auth/scripts/granted-auto-browser"
+    set -l controller "$HOME/.config/granted-auto-auth/scripts/granted-auto-auth"
     if not test -x "$controller"; or not "$controller" doctor
         echo "FAIL: core doctor failed"
         return 1
