@@ -1,78 +1,370 @@
 # granted-auto-auth
 
-Headless browser automation for [Granted](https://github.com/fwdcloudsec/granted) AWS IAM Identity Center reauthentication. It completes supported username, password, TOTP, and AWS approval pages while keeping Granted responsible for profiles, SSO tokens, and AWS credentials.
+`granted-auto-auth` is a shell-neutral controller and headless browser sidecar for Granted v0.39.x. Granted still owns AWS profile selection, IAM Identity Center tokens, and role credentials. This project automates only the supported browser reauthentication flow.
 
-Supported systems:
+## Supported systems
 
-- macOS with Fish
-- Ubuntu with Fish
-- Ubuntu with Bash
+| Operating system | Shell | Status |
+| --- | --- | --- |
+| macOS | Fish | Supported |
+| Ubuntu Linux | Fish | Supported |
+| Ubuntu Linux | Bash | Supported |
+
+Other Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller rejects unsupported operating systems; the bundled shell adapter rejects unsupported shell combinations.
 
 ## Requirements
-- [uv](https://docs.astral.sh/uv/), 
-- Granted v0.39.x
-- Fish or Bash configured to source this repository's `assume` adapter.
-- On Ubuntu, the user's D-Bus session must expose an unlocked default Secret Service collection owned by `gnome-keyring-daemon`.
 
-## Install
+- Git
+- [uv](https://docs.astral.sh/uv/) with access to Python 3.12 or newer
+- [Granted](https://docs.commonfate.io/granted/getting-started) v0.39.x, with both `granted` and `assumego` on `PATH`
+- Fish or Bash configured to source the bundled adapter
+- Network access during `install` to resolve the locked script environment and download Chromium
+- On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon`
 
-Clone the repository into its expected configuration directory:
+Authentication runs from the locked local environment with no dependency downloads after installation.
+
+## Installation
+
+### 1. Clone the repository
+
+The repository and private configuration files intentionally share `$HOME/.config/granted-auto-auth`. The private files are ignored by Git.
 
 ```sh
 git clone https://github.com/nathannli/granted-auto-auth.git "$HOME/.config/granted-auto-auth"
 ```
 
-Add the repository's `scripts` directory to `PATH`.
+For an existing clone, update it without rewriting local state:
 
-Fish, on macOS or Ubuntu:
+```sh
+git -C "$HOME/.config/granted-auto-auth" pull --ff-only
+```
+
+### 2. Add the controller to `PATH`
+
+The executable is in the repository's `scripts` directory, not its root.
+
+Fish on macOS or Ubuntu:
 
 ```fish
 fish_add_path "$HOME/.config/granted-auto-auth/scripts"
 source "$HOME/.config/granted-auto-auth/adapters/fish/assume.fish"
 ```
 
-Bash, on Ubuntu: add these lines to `$HOME/.bashrc`, then start a new shell or run `source "$HOME/.bashrc"`:
+Put the `source` line in `$HOME/.config/fish/config.fish`. `fish_add_path` persists the path in Fish's universal variables. Open a new shell, or use the current shell immediately.
+
+Bash on Ubuntu: add the following line to `$HOME/.bashrc`:
 
 ```bash
 export PATH="$HOME/.config/granted-auto-auth/scripts:$PATH"
 source "$HOME/.config/granted-auto-auth/adapters/bash/assume.bash"
 ```
 
-Confirm the command is available:
+Load the change:
+
+```bash
+source "$HOME/.bashrc"
+```
+
+Verify the resolved command:
 
 ```sh
 command -v granted-auto-browser
 ```
 
-Then create the credential file, configure Granted, and install Chromium by following the [complete installation guide](docs/granted-auto-auth.md#installation).
+It should resolve to:
 
-Adding `scripts` to `PATH` exposes the controller. Sourcing the matching adapter defines `assume` and `granted-auto-auth-doctor` in the current shell. The standalone repository owns this generic integration; personal profile aliases and system-specific hooks may remain in separate dotfiles.
+```text
+$HOME/.config/granted-auto-auth/scripts/granted-auto-browser
+```
 
-During installation, the controller uses `granted settings set` to change only `CustomSSOBrowserPath` in `$HOME/.granted/config`. It saves the previous value in `$HOME/.config/granted-auto-auth/install.toml`, verifies that Granted persisted the new absolute sidecar path, and restores the saved value during `uninstall`. See [How Granted configuration changes](docs/granted-auto-auth.md#how-granted-configuration-changes).
+### 3. Create the credential file
 
-## Commands
+```sh
+install -d -m 700 "$HOME/.config/granted-auto-auth"
+cp "$HOME/.config/granted-auto-auth/examples/granted-auto-auth.credentials.toml" \
+  "$HOME/.config/granted-auto-auth/credentials.toml"
+chmod 600 "$HOME/.config/granted-auto-auth/credentials.toml"
+```
 
-`granted-auto-browser` accepts exactly one command and no flags:
+Edit `$HOME/.config/granted-auto-auth/credentials.toml`:
 
-| Command | What it does |
+```toml
+username = "user@example.com"
+password = "replace-me"
+totp_secret = "BASE32SECRET"
+idp = "aws_identity_center"
+```
+
+| Field | Meaning |
 | --- | --- |
-| `granted-auto-browser install` | Installs the locked Python environment and matching Chromium, saves the previous Granted custom-browser setting, and configures the headless sidecar. Safe to repeat; a healthy repeat install verifies and repairs the locked runtime. |
-| `granted-auto-browser enabled` | Performs a silent, authentication-free readiness check. Exit status `0` means ready; `1` means disabled or unhealthy. Intended for scripts and shell adapters. |
-| `granted-auto-browser doctor` | Prints non-secret diagnostics for credentials, Granted settings/version, install state, Chromium, process support, browser-profile permissions, and the Ubuntu Secret Service. Exit status `0` means ready; `1` means one or more `FAIL:` checks. `WARN:` lines do not fail readiness. |
-| `granted-auto-browser uninstall` | Restores the previous Granted custom-browser setting and removes install state. Preserves downloaded Chromium, credentials, and the browser profile. |
+| `username` | IAM Identity Center sign-in username. |
+| `password` | IAM Identity Center sign-in password. |
+| `totp_secret` | Base32 `secret=` value from the `otpauth://totp/...` URI, not the rotating six-digit code. Spaces and hyphens are accepted and normalized. |
+| `idp` | Authentication adapter. The only supported value is `aws_identity_center`. |
 
-Any missing, extra, or unknown argument prints usage and exits `2`.
+The directory must be owned by the current user with mode `0700`. The credential file must be a regular, non-symlink file owned by the current user with mode `0600` or stricter.
 
-## Use
+The credential file is plaintext protected by local file ownership and permissions; it is not stored in the system keyring. Use this only on a trusted, encrypted workstation account. Granted's SSO-token cache remains separate and uses its configured secure-storage backend.
+
+### 4. Configure Granted
+
+The controller requires authorization-code flow and Granted's credential-process cache:
+
+```sh
+granted settings set --setting UseAuthorizationCode --value true
+granted settings set --setting DisableCredentialProcessCache --value false
+```
+
+`install` changes only `CustomSSOBrowserPath`. It records the previous value so `uninstall` can restore it.
+
+#### How Granted configuration changes
+
+Granted stores its settings in `$HOME/.granted/config`. The controller does not rewrite that TOML file itself. It asks Granted to update one setting with the equivalent of:
+
+```sh
+granted settings set \
+  --setting CustomSSOBrowserPath \
+  --value /absolute/path/to/granted-auto-auth/scripts/granted_auto_browser.py
+```
+
+Granted then persists an absolute path like this:
+
+```toml
+CustomSSOBrowserPath = "/Users/alice/.config/granted-auto-auth/scripts/granted_auto_browser.py"
+```
+
+The exact home-directory prefix differs by operating system. The stored value is always expanded to an absolute path; `$HOME` and `~` are not written literally.
+
+The installation sequence is:
+
+1. Read the current `CustomSSOBrowserPath` from `$HOME/.granted/config`.
+2. Save that previous value in `$HOME/.config/granted-auto-auth/install.toml`.
+3. Provision the locked runtime and Chromium before changing Granted.
+4. Ask `granted settings set` to write the sidecar's absolute path.
+5. Read `$HOME/.granted/config` again and require the persisted value to match exactly.
+6. Mark the install state as configured only after verification succeeds.
+
+If installation fails after changing Granted, rollback restores the saved value. `uninstall` first marks its state as uninstalling, asks Granted to restore the saved `CustomSSOBrowserPath`, verifies the result, and only then removes `install.toml`. If another tool or user has changed `CustomSSOBrowserPath` since installation, `uninstall` refuses to overwrite that unrelated value.
+
+The controller only validates `UseAuthorizationCode` and `DisableCredentialProcessCache` during `doctor`; `install` does not change them. The explicit setup commands above remain user-controlled changes.
+
+### 5. Install the browser runtime
+
+```sh
+granted-auto-browser install
+granted-auto-browser doctor
+```
+
+`install` verifies the locked PEP 723 environment, downloads the exact Playwright Chromium revision, writes `$HOME/.config/granted-auto-auth/install.toml`, and configures the sidecar as Granted's custom SSO browser. A successful doctor ends with:
+
+```text
+OK: granted-auto-auth is ready
+```
+
+### 6. Confirm the shell adapter
+
+Adding `scripts` to `PATH` exposes the controller. Sourcing the matching bundled adapter defines `assume` and `granted-auto-auth-doctor` in the current shell. Confirm both layers:
+
+```sh
+granted-auto-browser doctor
+granted-auto-auth-doctor
+```
+
+## Shell integration contract
+
+This repository is independent of Fish and Bash dotfile repositories and publishes both generic adapters itself. Each adapter:
+
+1. Resolve the real `assumego` executable before prepending the private shim directory.
+2. Export that absolute path as `GRANTED_AUTO_AUTH_REAL_ASSUMEGO`.
+3. Export one absolute monotonic deadline as `GRANTED_AUTO_AUTH_DEADLINE_NS`; the supported overall timeout is 180 seconds.
+4. Prepend `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin` to `PATH` for only the `assume` call.
+5. Reuse an existing deadline for nested calls.
+6. Restore the caller's `PATH` and `GRANTED_AUTO_AUTH_*` environment after the call.
+7. Preserve Granted's exit status and stop on deadline exit `124` rather than retrying.
+
+The private `assumego` shim and browser sidecar are implementation details. Do not invoke them directly.
+
+The Fish adapter supports one optional system-specific hook. If a function named `granted_auto_auth_pre_assume` exists, the adapter calls it after the authentication-free dry probe and immediately before Granted. For example, macOS dotfiles may unlock the login Keychain without making the generic adapter depend on a particular Keychain password function:
+
+```fish
+function granted_auto_auth_pre_assume
+    if is_mac
+        unlockkeychain
+    end
+end
+```
+
+Personal profile aliases such as `aprod` or `sprod`, SSH/SSM helpers, and the implementation of `is_mac` or `unlockkeychain` belong in personal dotfiles. The core repository neither imports nor checks out those dotfiles.
+
+## Controller command reference
+
+Syntax:
+
+```text
+granted-auto-browser doctor|enabled|install|uninstall
+```
+
+The controller accepts one command. It has no short options, long options, positional values, or combined commands.
+
+### `install`
+
+```sh
+granted-auto-browser install
+```
+
+- Requires network access for initial dependency and Chromium installation.
+- Verifies the script lock before modifying Granted.
+- Saves the current `CustomSSOBrowserPath`.
+- Installs the matching Chromium revision.
+- Sets `CustomSSOBrowserPath` to the repository sidecar.
+- Rolls back the Granted setting if installation fails.
+- Recovers safely from known interrupted installation phases.
+- Is idempotent. When already enabled, it revalidates and resynchronizes the locked runtime.
+- Returns `0` on success and `1` on failure.
+
+### `enabled`
+
+```sh
+granted-auto-browser enabled
+```
+
+Silent and authentication-free. It returns `0` only when all of these are healthy:
+
+- configured install state and exact Playwright version;
+- Granted custom-browser path;
+- sidecar, lock file, and matching executable Chromium revision;
+- supported process backend;
+- on Ubuntu, the Secret Service owner and unlocked default collection.
+
+It returns `1` for disabled, incomplete, stale, unsupported, or unhealthy state. Use `doctor` to learn why.
+
+### `doctor`
+
+```sh
+granted-auto-browser doctor
+```
+
+Runs authentication-free diagnostics for:
+
+- credential file presence, fields, ownership, and permissions;
+- Granted v0.39.x availability;
+- `UseAuthorizationCode=true`;
+- `DisableCredentialProcessCache=false`;
+- current installation and Chromium state;
+- macOS `libproc` or Ubuntu `/proc` support;
+- Ubuntu Secret Service availability, owner, and default-collection lock state;
+- dedicated browser-profile ownership and permissions;
+- legacy inline SSO profiles and container fallback warnings.
+
+`FAIL:` lines produce exit `1`. `WARN:` lines are informational and do not change a successful exit. A healthy result prints `OK: granted-auto-auth is ready` and exits `0`.
+
+### `uninstall`
+
+```sh
+granted-auto-browser uninstall
+```
+
+- Refuses to overwrite a Granted browser setting that no longer matches this installation.
+- Restores the `CustomSSOBrowserPath` saved by `install`.
+- Removes `$HOME/.config/granted-auto-auth/install.toml`.
+- Preserves `$HOME/.config/granted-auto-auth/credentials.toml`.
+- Preserves downloaded Chromium and `$HOME/.local/share/granted-auto-auth/browser` for recovery or later reuse.
+- Returns `0` on success and `1` on failure.
+
+### Usage errors and exit statuses
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Command succeeded, doctor is healthy, or automation is enabled. |
+| `1` | Controller operation failed, doctor found a failure, or automation is not enabled. |
+| `2` | Missing, extra, or unknown controller argument. |
+| `124` | The shell adapter's 180-second authentication deadline expired. Do not loop or immediately retry. |
+
+The browser sidecar has additional internal exit codes and structured events. They are consumed by the integration and are not a public command interface.
+
+## Authentication usage
+
+Export credentials into the current interactive shell:
 
 ```sh
 assume <profile> --use-authorization-code
 ```
 
-For an agent or one command, keep credentials scoped to the child process:
+Run one command with credentials confined to the child process:
 
 ```sh
 assume <profile> --use-authorization-code --exec -- aws sts get-caller-identity
 ```
 
-A valid Granted cache returns without browser automation. An expired session launches the headless sidecar. See the [full command, configuration, security, and troubleshooting reference](docs/granted-auto-auth.md).
+Relevant Granted options:
+
+| Option | Behavior |
+| --- | --- |
+| `<profile>` | Exact AWS profile to assume. |
+| `--use-authorization-code` | Selects the PKCE authorization-code flow required by this automation. |
+| `--exec -- <command>` | Runs one command with temporary credentials instead of exporting them into the caller. Preferred for agents. |
+| `--no-cache` | Forces Granted to bypass cached session credentials. Use only for a specifically stale cache or an intentional fresh-login test. |
+
+These are Granted options, not controller options. Run `assumego --help` for Granted's complete option list.
+
+A valid Granted cache returns immediately without launching Chromium. An expired session opens the persistent headless browser profile and attempts username, password, TOTP, and AWS access approval.
+
+## Files and state
+
+| Path | Purpose | Removed by `uninstall`? |
+| --- | --- | --- |
+| `$HOME/.config/granted-auto-auth/credentials.toml` | Private IdP credentials and TOTP seed. | No |
+| `$HOME/.config/granted-auto-auth/install.toml` | Installation phase, previous browser setting, and Chromium identity. | Yes |
+| `$HOME/.local/share/granted-auto-auth/browser/` | Persistent dedicated Chromium profile. | No |
+| `$HOME/.local/share/granted-auto-auth/browser.lock` | Single-browser-process lock. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted-auto-browser` | Public controller command. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted_auto_browser.py` | Granted custom-browser sidecar; internal. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin/assumego` | Deadline shim; internal. | No |
+| `$HOME/.config/granted-auto-auth/adapters/fish/assume.fish` | Generic Fish `assume` integration. | No |
+| `$HOME/.config/granted-auto-auth/adapters/bash/assume.bash` | Generic Ubuntu Bash `assume` integration. | No |
+
+Do not commit `credentials.toml` or `install.toml`. Do not inspect or publish browser URLs, process arguments, SSO cache contents, TOTP values, or AWS credentials.
+
+## Supported and unsupported browser flows
+
+Supported:
+
+- IAM Identity Center username
+- password
+- TOTP
+- AWS access approval
+- PKCE callback completion
+
+Fails closed and requires human action:
+
+- CAPTCHA
+- WebAuthn or security keys
+- push approval
+- device compliance
+- password changes or resets
+- account recovery
+- unknown authentication challenges
+
+Containers may cause Granted to fall back to device flow. The controller reports this as a warning because device approval requires human action.
+
+## Troubleshooting
+
+Start with:
+
+```sh
+granted-auto-browser doctor
+```
+
+Common results:
+
+- `installation is not enabled`: run `granted-auto-browser install`, then rerun doctor.
+- `Granted v0.39.x is required`: install a supported Granted release.
+- `UseAuthorizationCode must be true`: set the Granted setting shown in the installation section.
+- `DisableCredentialProcessCache must be false`: re-enable Granted's cache with the setting shown above.
+- `Secret Service is unavailable`: ensure the Ubuntu user D-Bus session and `gnome-keyring-daemon` are running.
+- `Secret Service default collection is locked`: unlock the user's default keyring collection, then rerun doctor.
+- `legacy inline SSO profiles detected`: migrate those AWS profiles to shared `[sso-session ...]` configuration when practical. This is a warning, not a failure.
+- Exit `124`: the shared hard deadline expired. Stop rather than starting a retry loop.
+- `unsupported_challenge`: complete the unsupported step manually; do not weaken the browser selectors or bypass the challenge.
+
+Preserve Granted's encrypted cache and the browser profile during troubleshooting. A cache hit is expected and proves reuse; deleting `$HOME/.aws/cli`, `$HOME/.aws/sso`, or the browser profile is not a normal installation or repair step.
