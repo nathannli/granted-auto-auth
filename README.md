@@ -6,20 +6,29 @@
 
 | Operating system | Shell | Status |
 | --- | --- | --- |
-| macOS | Fish | Supported |
-| Ubuntu Linux | Fish | Supported |
-| Ubuntu Linux | Bash | Supported |
+| macOS Tahoe | Fish 4.x | Supported |
+| Ubuntu 24.04 | Fish 4.x | Supported |
+| Ubuntu 24.04 | Bash 5.x | Supported |
+| Kubuntu 26.04 | Bash 5.x | Supported |
 
-Other Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller rejects unsupported operating systems; the bundled shell adapter rejects unsupported shell combinations.
+Other operating-system or shell versions, Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller verifies the operating-system family and Linux distribution; the bundled shell adapter verifies the shell combination.
 
-Kubuntu is supported when `/etc/os-release` identifies it as Ubuntu. Its KWallet 6 Secret Service backend runs as `ksecretd`.
+Kubuntu 26.04 is supported when `/etc/os-release` identifies it as Ubuntu. Its KWallet 6 Secret Service backend runs as `ksecretd`.
+
+Tested combinations:
+
+| System | Shell | Secure storage |
+| --- | --- | --- |
+| macOS Tahoe | Fish 4.x | Login Keychain |
+| Ubuntu 24.04 GNOME | Fish 4.x and Bash 5.x | `gnome-keyring-daemon` |
+| Kubuntu 26.04 KDE | Bash 5.x | KWallet 6 `ksecretd` |
 
 ## Requirements
 
 - Git
 - [uv](https://docs.astral.sh/uv/) with access to Python 3.12 or newer
 - [Granted](https://docs.commonfate.io/granted/getting-started) v0.39.x, with both `granted` and `assumego` on `PATH`
-- Fish or Bash configured to source the bundled adapter
+- Fish 4.x or Bash 5.x configured to source the bundled adapter
 - Network access during `install` to resolve the locked script environment and download Chromium
 - On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon` or KWallet `ksecretd`
 
@@ -150,6 +159,17 @@ If installation fails after changing Granted, rollback restores the saved value.
 
 The controller only validates `UseAuthorizationCode` and `DisableCredentialProcessCache` during `doctor`; `install` does not change them. The explicit setup commands above remain user-controlled changes.
 
+#### Ubuntu secure storage
+
+Granted stores IAM Identity Center tokens through the Secret Service API. The controller accepts either supported user-owned backend:
+
+- Ubuntu GNOME: `gnome-keyring-daemon`
+- Kubuntu KDE with KWallet 6: `ksecretd`
+
+The default collection must already be unlocked. On Kubuntu, log in to the KDE desktop and unlock KWallet before using the automation over SSH. The SSH shell must connect to the same user D-Bus session; a typical session has `DBUS_SESSION_BUS_ADDRESS` set and uses `$XDG_RUNTIME_DIR/bus`.
+
+The readiness check resolves the process that owns `org.freedesktop.secrets`, requires it to belong to the current user, and reads only the default collection's `Locked` property. It does not enumerate or modify wallet items. If readiness fails, `doctor` prints the corrective action in the same `FAIL:` line.
+
 ### 5. Install the browser runtime
 
 ```sh
@@ -157,7 +177,7 @@ granted-auto-auth install
 granted-auto-auth doctor
 ```
 
-`install` verifies the locked PEP 723 environment, downloads the exact Playwright Chromium revision, writes `$HOME/.config/granted-auto-auth/install.toml`, and configures the sidecar as Granted's custom SSO browser. A successful doctor ends with:
+`install` verifies the locked PEP 723 environment, downloads the exact Playwright Chromium revision, writes `$HOME/.config/granted-auto-auth/install.toml`, and configures the sidecar as Granted's custom SSO browser. A successful core diagnostic ends with:
 
 ```text
 OK: granted-auto-auth is ready
@@ -171,6 +191,8 @@ Adding `scripts` to `PATH` exposes the controller. Sourcing the matching bundled
 granted-auto-auth doctor
 granted-auto-auth-doctor
 ```
+
+The shell diagnostic ends with `OK: Fish adapter is ready` or `OK: Bash adapter is ready`.
 
 ## Shell integration contract
 
