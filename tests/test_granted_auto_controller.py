@@ -121,16 +121,37 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(bus.call_args_list[2].args[0][0], "get-property")
         self.assertEqual(bus.call_args_list[2].args[0][1], ":1.42")
 
+    def test_secret_service_health_accepts_unlocked_kwallet_collection(self) -> None:
+        outputs = ['s ":1.42"', "u 1234", "b false"]
+        with mock.patch.object(controller, "_busctl", side_effect=outputs), mock.patch.object(
+            controller, "_secret_service_process", return_value=("/usr/bin/ksecretd", os.getuid())
+        ):
+            self.assertEqual(controller._secret_service_health(), [])
+
     def test_secret_service_health_rejects_missing_service(self) -> None:
         with mock.patch.object(controller, "_busctl", side_effect=controller.ControllerError("missing")):
-            self.assertEqual(controller._secret_service_health(), ["Secret Service is unavailable"])
+            self.assertEqual(
+                controller._secret_service_health(),
+                ["Secret Service is unavailable; start a user D-Bus session and gnome-keyring-daemon or ksecretd"],
+            )
 
     def test_secret_service_health_rejects_wrong_owner(self) -> None:
         with mock.patch.object(controller, "_busctl", side_effect=['s ":1.42"', "u 1234"]), mock.patch.object(
             controller, "_secret_service_process", return_value=("/usr/bin/not-a-wallet", os.getuid())
         ):
             self.assertEqual(
-                controller._secret_service_health(), ["Secret Service owner is not the user gnome-keyring-daemon"]
+                controller._secret_service_health(),
+                [
+                    "Secret Service owner must be the user's gnome-keyring-daemon or ksecretd; "
+                    "start a supported wallet and unlock its default collection"
+                ],
+            )
+
+    def test_secret_service_health_reports_invalid_owner_pid_solution(self) -> None:
+        with mock.patch.object(controller, "_busctl", side_effect=['s ":1.42"', "invalid"]):
+            self.assertEqual(
+                controller._secret_service_health(),
+                ["Secret Service owner PID response is invalid; restart the supported wallet"],
             )
 
     def test_secret_service_health_rejects_missing_default_alias(self) -> None:
@@ -140,14 +161,21 @@ class ControllerTests(unittest.TestCase):
             controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
         ):
             self.assertEqual(
-                controller._secret_service_health(), ["Secret Service default collection is unavailable"]
+                controller._secret_service_health(),
+                [
+                    "Secret Service default collection is unavailable; configure and unlock a default collection "
+                    "in the supported wallet"
+                ],
             )
 
     def test_secret_service_health_rejects_locked_default_collection(self) -> None:
         with mock.patch.object(controller, "_busctl", side_effect=['s ":1.42"', "u 1234", "b true"]), mock.patch.object(
             controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
         ):
-            self.assertEqual(controller._secret_service_health(), ["Secret Service default collection is locked"])
+            self.assertEqual(
+                controller._secret_service_health(),
+                ["Secret Service default collection is locked; unlock the default collection in the supported wallet"],
+            )
 
     def test_macos_platform_health_does_not_probe_secret_service(self) -> None:
         with mock.patch.object(controller.sys, "platform", "darwin"), mock.patch.object(
@@ -446,6 +474,27 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(controller.doctor(), 1)
         messages = [call.args[0] for call in output.call_args_list]
         self.assertIn("FAIL: unsupported process platform: plan9", messages)
+
+    def test_doctor_failures_include_setting_and_install_solutions(self) -> None:
+        with mock.patch.object(controller, "_credential_health", return_value=[]), mock.patch.object(
+            controller, "run_checked", return_value=mock.Mock(stdout="Granted 0.39.2")
+        ), mock.patch.object(
+            controller, "granted_config", return_value={"UseAuthorizationCode": False, "DisableCredentialProcessCache": True}
+        ), mock.patch.object(controller, "enabled", return_value=False), mock.patch.object(
+            controller, "_legacy_profiles", return_value=[]
+        ), mock.patch.object(controller, "platform_health", return_value=[]), mock.patch("builtins.print") as output:
+            self.assertEqual(controller.doctor(), 1)
+        messages = [call.args[0] for call in output.call_args_list]
+        self.assertIn(
+            "FAIL: UseAuthorizationCode must be true; run: granted settings set --setting UseAuthorizationCode --value true",
+            messages,
+        )
+        self.assertIn(
+            "FAIL: DisableCredentialProcessCache must be false; run: granted settings set --setting "
+            "DisableCredentialProcessCache --value false",
+            messages,
+        )
+        self.assertIn("FAIL: installation is not enabled; run: granted-auto-auth install", messages)
 
     def test_unknown_command_returns_usage(self) -> None:
         self.assertEqual(controller.main(["unknown"]), 2)

@@ -304,10 +304,10 @@ def _secret_service_health() -> list[str]:
             ["call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", "s", "org.freedesktop.secrets"]
         )
     except ControllerError:
-        return ["Secret Service is unavailable"]
+        return ["Secret Service is unavailable; start a user D-Bus session and gnome-keyring-daemon or ksecretd"]
     owner_match = re.fullmatch(r's\s+"(:[0-9.]+)"', owner_output)
     if not owner_match:
-        return ["Secret Service owner response is invalid"]
+        return ["Secret Service owner response is invalid; restart the supported wallet"]
     owner = owner_match.group(1)
     try:
         pid_output = _busctl(
@@ -315,22 +315,28 @@ def _secret_service_health() -> list[str]:
         )
         pid_match = re.fullmatch(r"u\s+(\d+)", pid_output)
         if not pid_match:
-            return ["Secret Service owner PID response is invalid"]
+            return ["Secret Service owner PID response is invalid; restart the supported wallet"]
         executable, uid = _secret_service_process(int(pid_match.group(1)))
     except (ControllerError, OSError, ValueError):
-        return ["Secret Service owner process is unavailable"]
-    if Path(executable).name != "gnome-keyring-daemon" or uid != os.getuid():
-        return ["Secret Service owner is not the user gnome-keyring-daemon"]
+        return ["Secret Service owner process is unavailable; restart the supported wallet"]
+    if Path(executable).name not in {"gnome-keyring-daemon", "ksecretd"} or uid != os.getuid():
+        return [
+            "Secret Service owner must be the user's gnome-keyring-daemon or ksecretd; "
+            "start a supported wallet and unlock its default collection"
+        ]
     try:
         locked = _busctl(
             ["get-property", owner, "/org/freedesktop/secrets/aliases/default", "org.freedesktop.Secret.Collection", "Locked"]
         )
     except ControllerError:
-        return ["Secret Service default collection is unavailable"]
+        return [
+            "Secret Service default collection is unavailable; configure and unlock a default collection "
+            "in the supported wallet"
+        ]
     if locked == "b true":
-        return ["Secret Service default collection is locked"]
+        return ["Secret Service default collection is locked; unlock the default collection in the supported wallet"]
     if locked != "b false":
-        return ["Secret Service default collection lock response is invalid"]
+        return ["Secret Service default collection lock response is invalid; restart the supported wallet"]
     return []
 
 
@@ -461,17 +467,22 @@ def doctor() -> int:
     try:
         version = run_checked(["granted", "--version"], capture=True).stdout.strip()
         if "0.39." not in version:
-            failures.append("Granted v0.39.x is required")
+            failures.append("Granted v0.39.x is required; install a Granted v0.39.x release")
         config = granted_config()
         if config.get("UseAuthorizationCode") is not True:
-            failures.append("UseAuthorizationCode must be true")
+            failures.append(
+                "UseAuthorizationCode must be true; run: granted settings set --setting UseAuthorizationCode --value true"
+            )
         if config.get("DisableCredentialProcessCache", False) is not False:
-            failures.append("DisableCredentialProcessCache must be false")
+            failures.append(
+                "DisableCredentialProcessCache must be false; run: granted settings set --setting "
+                "DisableCredentialProcessCache --value false"
+            )
     except ControllerError as error:
         failures.append(str(error))
     failures.extend(platform_health())
     if not enabled():
-        failures.append("installation is not enabled")
+        failures.append("installation is not enabled; run: granted-auto-auth install")
     browser_dir = Path.home() / ".local/share/granted-auto-auth/browser"
     if browser_dir.exists() and (browser_dir.stat().st_uid != os.getuid() or stat.S_IMODE(browser_dir.stat().st_mode) & ~0o700):
         failures.append("browser profile permissions are too permissive")

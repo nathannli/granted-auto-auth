@@ -12,6 +12,8 @@
 
 Other Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller rejects unsupported operating systems; the bundled shell adapter rejects unsupported shell combinations.
 
+Kubuntu is supported when `/etc/os-release` identifies it as Ubuntu. Its KWallet 6 Secret Service backend runs as `ksecretd`.
+
 ## Requirements
 
 - Git
@@ -19,7 +21,7 @@ Other Linux distributions, macOS with Bash, and other shells are outside the sup
 - [Granted](https://docs.commonfate.io/granted/getting-started) v0.39.x, with both `granted` and `assumego` on `PATH`
 - Fish or Bash configured to source the bundled adapter
 - Network access during `install` to resolve the locked script environment and download Chromium
-- On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon`
+- On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon` or KWallet `ksecretd`
 
 Authentication runs from the locked local environment with no dependency downloads after installation.
 
@@ -357,11 +359,12 @@ granted-auto-auth doctor
 
 Common results:
 
-- `installation is not enabled`: run `granted-auto-auth install`, then rerun doctor.
-- `Granted v0.39.x is required`: install a supported Granted release.
-- `UseAuthorizationCode must be true`: set the Granted setting shown in the installation section.
-- `DisableCredentialProcessCache must be false`: re-enable Granted's cache with the setting shown above.
-- `Secret Service is unavailable`: ensure the Ubuntu user D-Bus session and `gnome-keyring-daemon` are running.
+- `installation is not enabled; run: granted-auto-auth install`: run the displayed command, then rerun doctor.
+- `Granted v0.39.x is required; install a Granted v0.39.x release`: install a supported Granted release.
+- `UseAuthorizationCode must be true; run: granted settings set --setting UseAuthorizationCode --value true`: run the displayed command.
+- `DisableCredentialProcessCache must be false; run: granted settings set --setting DisableCredentialProcessCache --value false`: run the displayed command.
+- `Secret Service is unavailable`: ensure the Ubuntu user D-Bus session and either `gnome-keyring-daemon` or KWallet `ksecretd` are running.
+- `Secret Service owner must be the user's gnome-keyring-daemon or ksecretd`: start a supported wallet and unlock its default collection.
 - `Secret Service default collection is locked`: unlock the user's default keyring collection, then rerun doctor.
 - `legacy inline SSO profiles detected`: migrate those AWS profiles to shared `[sso-session ...]` configuration when practical. This is a warning, not a failure.
 - Exit `124`: the shared hard deadline expired. Stop rather than starting a retry loop.
