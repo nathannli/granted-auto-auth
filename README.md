@@ -11,7 +11,7 @@ Supported systems:
 ## Requirements
 - [uv](https://docs.astral.sh/uv/), 
 - Granted v0.39.x
-- a compatible Fish or Bash `assume` adapter. 
+- Fish or Bash configured to source this repository's `assume` adapter.
 - On Ubuntu, the user's D-Bus session must expose an unlocked default Secret Service collection owned by `gnome-keyring-daemon`.
 
 ## Install
@@ -28,12 +28,14 @@ Fish, on macOS or Ubuntu:
 
 ```fish
 fish_add_path "$HOME/.config/granted-auto-auth/scripts"
+source "$HOME/.config/granted-auto-auth/adapters/fish/assume.fish"
 ```
 
-Bash, on Ubuntu: add this line to `$HOME/.bashrc`, then start a new shell or run `source "$HOME/.bashrc"`:
+Bash, on Ubuntu: add these lines to `$HOME/.bashrc`, then start a new shell or run `source "$HOME/.bashrc"`:
 
 ```bash
 export PATH="$HOME/.config/granted-auto-auth/scripts:$PATH"
+source "$HOME/.config/granted-auto-auth/adapters/bash/assume.bash"
 ```
 
 Confirm the command is available:
@@ -44,7 +46,7 @@ command -v granted-auto-browser
 
 Then create the credential file, configure Granted, and install Chromium by following the [complete installation guide](docs/granted-auto-auth.md#installation).
 
-> Adding this repository to `PATH` exposes the controller. Automatic `assume` reauthentication also requires a shell adapter that supplies the shared deadline and verified `assumego` path. The adapter belongs to the user's Fish or Bash configuration and is intentionally not installed by this repository.
+Adding `scripts` to `PATH` exposes the controller. Sourcing the matching adapter defines `assume` and `granted-auto-auth-doctor` in the current shell. The standalone repository owns this generic integration; personal profile aliases and system-specific hooks may remain in separate dotfiles.
 
 During installation, the controller uses `granted settings set` to change only `CustomSSOBrowserPath` in `$HOME/.granted/config`. It saves the previous value in `$HOME/.config/granted-auto-auth/install.toml`, verifies that Granted persisted the new absolute sidecar path, and restores the saved value during `uninstall`. See [How Granted configuration changes](docs/granted-auto-auth.md#how-granted-configuration-changes).
 

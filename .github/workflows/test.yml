@@ -32,3 +32,39 @@ jobs:
         run: uv run --with playwright==1.62.0 --with pyotp==2.10.0 python -m unittest discover -s tests
       - name: Check whitespace
         run: git diff --check
+
+  fish-adapter:
+    name: Fish adapter (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14
+          - ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Fish on macOS
+        if: runner.os == 'macOS'
+        run: brew install fish
+      - name: Install Fish on Ubuntu
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes fish
+      - name: Check Fish syntax
+        run: fish -n adapters/fish/assume.fish tests/granted-auto-auth.fish
+      - name: Test Fish adapter
+        run: fish --no-config tests/granted-auto-auth.fish
+      - name: Check whitespace
+        run: git diff --check
+
+  bash-adapter:
+    name: Bash adapter (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check Bash syntax
+        run: bash -n adapters/bash/assume.bash tests/granted-auto-auth.bash
+      - name: Test Bash adapter
+        run: bash tests/granted-auto-auth.bash
+      - name: Check whitespace
+        run: git diff --check

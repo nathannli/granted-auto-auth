@@ -10,14 +10,14 @@
 | Ubuntu Linux | Fish | Supported |
 | Ubuntu Linux | Bash | Supported |
 
-Other Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller rejects unsupported operating systems; the external shell adapter is responsible for rejecting unsupported shell combinations.
+Other Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller rejects unsupported operating systems; the bundled shell adapter rejects unsupported shell combinations.
 
 ## Requirements
 
 - Git
 - [uv](https://docs.astral.sh/uv/) with access to Python 3.12 or newer
 - [Granted](https://docs.commonfate.io/granted/getting-started) v0.39.x, with both `granted` and `assumego` on `PATH`
-- A Fish or Bash adapter implementing the [shell integration contract](#shell-integration-contract)
+- Fish or Bash configured to source the bundled adapter
 - Network access during `install` to resolve the locked script environment and download Chromium
 - On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon`
 
@@ -47,14 +47,16 @@ Fish on macOS or Ubuntu:
 
 ```fish
 fish_add_path "$HOME/.config/granted-auto-auth/scripts"
+source "$HOME/.config/granted-auto-auth/adapters/fish/assume.fish"
 ```
 
-`fish_add_path` persists the path in Fish's universal variables. Open a new shell, or use the current shell immediately.
+Put the `source` line in `$HOME/.config/fish/config.fish`. `fish_add_path` persists the path in Fish's universal variables. Open a new shell, or use the current shell immediately.
 
 Bash on Ubuntu: add the following line to `$HOME/.bashrc`:
 
 ```bash
 export PATH="$HOME/.config/granted-auto-auth/scripts:$PATH"
+source "$HOME/.config/granted-auto-auth/adapters/bash/assume.bash"
 ```
 
 Load the change:
@@ -161,11 +163,16 @@ OK: granted-auto-auth is ready
 
 ### 6. Confirm the shell adapter
 
-Adding `scripts` to `PATH` installs the controller but does not replace Granted's shell function. Before authentication, the Fish or Bash adapter must satisfy the contract below. Run its own readiness check if it provides one.
+Adding `scripts` to `PATH` exposes the controller. Sourcing the matching bundled adapter defines `assume` and `granted-auto-auth-doctor` in the current shell. Confirm both layers:
+
+```sh
+granted-auto-browser doctor
+granted-auto-auth-doctor
+```
 
 ## Shell integration contract
 
-This repository is intentionally independent of Fish and Bash dotfile repositories. A compatible external `assume` adapter must:
+This repository is independent of Fish and Bash dotfile repositories and publishes both generic adapters itself. Each adapter:
 
 1. Resolve the real `assumego` executable before prepending the private shim directory.
 2. Export that absolute path as `GRANTED_AUTO_AUTH_REAL_ASSUMEGO`.
@@ -176,6 +183,18 @@ This repository is intentionally independent of Fish and Bash dotfile repositori
 7. Preserve Granted's exit status and stop on deadline exit `124` rather than retrying.
 
 The private `assumego` shim and browser sidecar are implementation details. Do not invoke them directly.
+
+The Fish adapter supports one optional system-specific hook. If a function named `granted_auto_auth_pre_assume` exists, the adapter calls it after the authentication-free dry probe and immediately before Granted. For example, macOS dotfiles may unlock the login Keychain without making the generic adapter depend on a particular Keychain password function:
+
+```fish
+function granted_auto_auth_pre_assume
+    if is_mac
+        unlockkeychain
+    end
+end
+```
+
+Personal profile aliases such as `aprod` or `sprod`, SSH/SSM helpers, and the implementation of `is_mac` or `unlockkeychain` belong in personal dotfiles. The core repository neither imports nor checks out those dotfiles.
 
 ## Controller command reference
 
@@ -259,7 +278,7 @@ granted-auto-browser uninstall
 | `0` | Command succeeded, doctor is healthy, or automation is enabled. |
 | `1` | Controller operation failed, doctor found a failure, or automation is not enabled. |
 | `2` | Missing, extra, or unknown controller argument. |
-| `124` | The external shell adapter's 180-second authentication deadline expired. Do not loop or immediately retry. |
+| `124` | The shell adapter's 180-second authentication deadline expired. Do not loop or immediately retry. |
 
 The browser sidecar has additional internal exit codes and structured events. They are consumed by the integration and are not a public command interface.
 
@@ -301,6 +320,8 @@ A valid Granted cache returns immediately without launching Chromium. An expired
 | `$HOME/.config/granted-auto-auth/scripts/granted-auto-browser` | Public controller command. | No |
 | `$HOME/.config/granted-auto-auth/scripts/granted_auto_browser.py` | Granted custom-browser sidecar; internal. | No |
 | `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin/assumego` | Deadline shim; internal. | No |
+| `$HOME/.config/granted-auto-auth/adapters/fish/assume.fish` | Generic Fish `assume` integration. | No |
+| `$HOME/.config/granted-auto-auth/adapters/bash/assume.bash` | Generic Ubuntu Bash `assume` integration. | No |
 
 Do not commit `credentials.toml` or `install.toml`. Do not inspect or publish browser URLs, process arguments, SSO cache contents, TOTP values, or AWS credentials.
 
