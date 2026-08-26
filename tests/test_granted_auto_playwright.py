@@ -75,6 +75,9 @@ PAGES = {
         <h1>Authentication Status</h1>
         <script>setTimeout(() => location='/oauth/callback', 1000)</script>
     """,
+    "/authentication-success": """
+        <h1>Authentication Successful</h1>
+    """,
     "/repeated-username": """
         <label for="username">Username</label><input id="username">
         <button onclick="location='/repeated-username'">Next</button>
@@ -176,6 +179,52 @@ class PlaywrightFixtureTests(unittest.TestCase):
 
     def test_post_approval_intermediate_state_reaches_callback(self) -> None:
         self.run_flow("/approval-status")
+
+    def test_v77_success_heading_rechecks_stale_body_snapshot(self) -> None:
+        page = self.browser.new_page()
+        try:
+            page.goto(self.base + "/authentication-success")
+            real_locator = page.locator
+            stale_body = mock.Mock()
+            stale_body.inner_text.return_value = "Waiting"
+
+            def locator(selector: str):
+                return stale_body if selector == "body" else real_locator(selector)
+
+            with mock.patch.object(page, "locator", side_effect=locator), mock.patch.object(
+                page, "wait_for_timeout"
+            ), mock.patch.object(
+                sidecar, "_wait_success_candidate", wraps=sidecar._wait_success_candidate
+            ) as wait:
+                sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 5_000_000_000)
+            wait.assert_called_once()
+        finally:
+            page.close()
+
+    def test_v77_transient_success_heading_still_fails_closed(self) -> None:
+        page = self.browser.new_page()
+        try:
+            page.goto(self.base + "/authentication-success")
+            real_locator = page.locator
+            real_wait = sidecar._wait_success_candidate
+            stale_body = mock.Mock()
+            stale_body.inner_text.return_value = "Waiting"
+
+            def locator(selector: str):
+                return stale_body if selector == "body" else real_locator(selector)
+
+            def clear_success(candidate_page, deadline: int) -> None:
+                real_wait(candidate_page, deadline)
+                candidate_page.locator("h1").evaluate("node => node.textContent = 'Unknown'")
+
+            with mock.patch.object(page, "locator", side_effect=locator), mock.patch.object(
+                page, "wait_for_timeout"
+            ), mock.patch.object(sidecar, "_wait_success_candidate", side_effect=clear_success) as wait:
+                with self.assertRaises(sidecar.UnsupportedChallenge):
+                    sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 5_000_000_000)
+            wait.assert_called_once()
+        finally:
+            page.close()
 
     def test_repeated_state_fails_closed(self) -> None:
         page = self.browser.new_page()

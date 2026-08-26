@@ -474,6 +474,14 @@ def _wait_unsupported_candidate(page: Page, deadline: int) -> None:
     validate_redirect_url(page.url)
 
 
+def _wait_success_candidate(page: Page, deadline: int) -> None:
+    if remaining_seconds(deadline) < 0.5:
+        raise AuthTimeout("not enough time to recheck authentication success")
+    page.wait_for_timeout(500)
+    remaining_seconds(deadline)
+    validate_redirect_url(page.url)
+
+
 def _totp_now(secret: str, deadline: int) -> str:
     interval = 30
     remaining_window = interval - (time.time() % interval)
@@ -504,6 +512,7 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
     page.goto(page.url, wait_until="domcontentloaded", timeout=remaining_seconds(deadline) * 1_000)
     completed: set[str] = set()
     unsupported_candidate = False
+    success_candidate = False
     for _ in range(12):
         if remaining_seconds(deadline) < 0.05:
             raise AuthTimeout("not enough time for next browser action")
@@ -578,6 +587,17 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
         if SUCCESS_TEXT.search(body_text):
             emit("success", "approval", credentials.idp)
             return
+        success_heading = any(
+            SUCCESS_TEXT.search(value) for value in page.get_by_role("heading").all_inner_texts()
+        )
+        if success_heading:
+            if success_candidate:
+                emit("success", "approval", credentials.idp)
+                return
+            success_candidate = True
+            _wait_success_candidate(page, deadline)
+            continue
+        success_candidate = False
         page.wait_for_timeout(min(500, remaining_seconds(deadline) * 1_000))
     labels = [f"button:{value}" for value in page.get_by_role("button").all_inner_texts()]
     labels.extend(f"heading:{value}" for value in page.get_by_role("heading").all_inner_texts())
