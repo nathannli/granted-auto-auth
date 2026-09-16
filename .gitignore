@@ -1,5 +1,7 @@
 credentials.toml
 install.toml
+install.lock
+locks/
 .reposcry/
 .reposcryignore
 __pycache__/

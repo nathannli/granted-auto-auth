@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import ctypes
 import functools
 import json
@@ -23,6 +22,13 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
+if os.name == "nt":
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import granted_auto_windows as windows
+else:
+    import fcntl
 
 import pyotp
 from playwright.sync_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -188,6 +194,11 @@ def _validate_stat(path: Path, result: os.stat_result, allowed_mode: int) -> Non
 
 
 def read_secure_toml(path: Path, allowed_mode: int = 0o600) -> dict[str, object]:
+    if os.name == "nt":
+        try:
+            return tomllib.loads(windows.read_secure_bytes(path).decode())
+        except UnicodeDecodeError as error:
+            raise SetupError(f"unable to load {path.name}") from error
     parent = path.parent
     parent_stat = os.lstat(parent)
     if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
@@ -307,6 +318,10 @@ def _darwin_process_info(pid: int) -> tuple[int, str, str]:
 
 
 def _process_info(pid: int) -> tuple[int, str, str]:
+    if os.name == "nt":
+        parent, start_time, executable, handle = windows.process_info(pid)
+        windows.close_handle(handle)
+        return parent, start_time, executable
     if sys.platform.startswith("linux"):
         parent, start_time = _proc_stat(pid)
         executable = os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
@@ -317,26 +332,43 @@ def _process_info(pid: int) -> tuple[int, str, str]:
 
 
 def find_assumego_ancestor(expected_executable: str | None = None) -> ProcessIdentity:
-    expected = os.path.realpath(expected_executable or os.environ.get("GRANTED_AUTO_AUTH_REAL_ASSUMEGO", ""))
+    expected_value = expected_executable or os.environ.get("GRANTED_AUTO_AUTH_REAL_ASSUMEGO", "")
+    expected = windows.canonical_path(expected_value) if os.name == "nt" and expected_value else os.path.realpath(expected_value)
     if not expected or not os.path.isfile(expected) or not os.access(expected, os.X_OK):
         raise SetupError("verified assumego executable is missing")
     pid = os.getppid()
     while pid > 1:
         try:
-            parent, start_time, executable = _process_info(pid)
+            if os.name == "nt":
+                parent, start_time, executable, handle = windows.process_info(pid)
+            else:
+                parent, start_time, executable = _process_info(pid)
+                handle = None
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             break
         if executable == expected:
+            if os.name == "nt":
+                return ProcessIdentity(pid, start_time, executable, handle)
             try:
                 pidfd = os.pidfd_open(pid) if sys.platform.startswith("linux") and hasattr(os, "pidfd_open") else None
             except OSError:
                 pidfd = None
             return ProcessIdentity(pid, start_time, executable, pidfd)
+        if os.name == "nt":
+            windows.close_handle(handle)
         pid = parent
     raise SetupError("verified assumego ancestor is missing")
 
 
 def process_matches(identity: ProcessIdentity) -> bool:
+    if os.name == "nt":
+        if identity.pidfd is None or not windows.process_alive(identity.pidfd):
+            return False
+        try:
+            start_time, executable = windows.process_handle_identity(identity.pidfd)
+        except OSError:
+            return False
+        return start_time == identity.start_time and executable == identity.executable
     try:
         _, start_time, executable = _process_info(identity.pid)
     except (FileNotFoundError, PermissionError, ProcessLookupError):
@@ -345,6 +377,8 @@ def process_matches(identity: ProcessIdentity) -> bool:
 
 
 def process_alive(identity: ProcessIdentity) -> bool:
+    if os.name == "nt":
+        return process_matches(identity)
     if not process_matches(identity):
         return False
     try:
@@ -363,6 +397,10 @@ def _send_signal(identity: ProcessIdentity, sig: signal.Signals) -> None:
 
 
 def cancel_process(identity: ProcessIdentity, deadline: int, immediate: bool = False) -> None:
+    if os.name == "nt":
+        if identity.pidfd is not None and process_matches(identity):
+            windows.terminate_process(identity.pidfd)
+        return
     if not process_alive(identity):
         return
     if immediate or time.monotonic_ns() >= deadline:
@@ -376,8 +414,13 @@ def cancel_process(identity: ProcessIdentity, deadline: int, immediate: bool = F
         _send_signal(identity, signal.SIGKILL)
 
 
-def acquire_profile_lock(deadline: int, path: Path | None = None) -> int:
+def acquire_profile_lock(deadline: int, path: Path | None = None):
     lock_path = path or Path.home() / ".local/share/granted-auto-auth/browser.lock"
+    if os.name == "nt":
+        try:
+            return windows.lock_file(lock_path, deadline)
+        except TimeoutError as error:
+            raise AuthTimeout(str(error)) from error
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(lock_path.parent, 0o700)
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
@@ -591,6 +634,9 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
             SUCCESS_TEXT.search(value) for value in page.get_by_role("heading").all_inner_texts()
         )
         if success_heading:
+            if "approval" in completed:
+                emit("success", "approval", credentials.idp)
+                return
             if success_candidate:
                 emit("success", "approval", credentials.idp)
                 return
@@ -606,8 +652,14 @@ def automate_aws_login(page: Page, credentials: Credentials, deadline: int) -> N
 
 def run_browser(url: str, credentials: Credentials, deadline: int, chromium_path: str) -> None:
     profile = Path.home() / ".local/share/granted-auto-auth/browser"
-    profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(profile, 0o700)
+    if os.name == "nt":
+        parent = windows.secure_open(profile.parent, directory=True)
+        directory = windows.secure_open(profile, directory=True)
+        windows.close_handle(directory)
+        windows.close_handle(parent)
+    else:
+        profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(profile, 0o700)
     with sync_playwright() as playwright:
         options: dict[str, object] = {
             "headless": True,
@@ -627,7 +679,10 @@ def run_browser(url: str, credentials: Credentials, deadline: int, chromium_path
 
 def close_identity(identity: ProcessIdentity | None) -> None:
     if identity and identity.pidfd is not None:
-        os.close(identity.pidfd)
+        if os.name == "nt":
+            windows.close_handle(identity.pidfd)
+        else:
+            os.close(identity.pidfd)
 
 
 def main(argv: list[str]) -> int:
@@ -667,8 +722,11 @@ def main(argv: list[str]) -> int:
         return error.exit_code
     finally:
         if lock_descriptor is not None:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-            os.close(lock_descriptor)
+            if os.name == "nt":
+                windows.unlock_file(*lock_descriptor)
+            else:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+                os.close(lock_descriptor)
         close_identity(identity)
 
 

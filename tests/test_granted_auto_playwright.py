@@ -226,6 +226,32 @@ class PlaywrightFixtureTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_post_approval_success_heading_is_terminal_without_recheck(self) -> None:
+        page = self.browser.new_page()
+        try:
+            page.goto(self.base + "/authentication-success")
+            real_locator = page.locator
+            stale_body = mock.Mock()
+            stale_body.inner_text.return_value = "Waiting"
+
+            def locator(selector: str):
+                return stale_body if selector == "body" else real_locator(selector)
+
+            def clear_success(candidate_page, deadline: int) -> None:
+                candidate_page.locator("h1").evaluate("node => node.textContent = 'Unknown'")
+
+            with mock.patch.object(page, "locator", side_effect=locator), mock.patch.object(
+                page, "wait_for_url", side_effect=sidecar.PlaywrightTimeoutError("no callback")
+            ), mock.patch.object(sidecar, "_wait_page"), mock.patch.object(
+                sidecar, "_click_approval", return_value=True
+            ), mock.patch.object(
+                sidecar, "_wait_success_candidate", side_effect=clear_success
+            ) as wait:
+                sidecar.automate_aws_login(page, self.credentials, time.monotonic_ns() + 5_000_000_000)
+            wait.assert_not_called()
+        finally:
+            page.close()
+
     def test_repeated_state_fails_closed(self) -> None:
         page = self.browser.new_page()
         try:

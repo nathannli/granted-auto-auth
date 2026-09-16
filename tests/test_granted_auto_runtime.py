@@ -13,6 +13,7 @@ SIDECAR = ROOT / "scripts/granted_auto_auth.py"
 LOCKFILE = ROOT / "scripts/granted_auto_auth.py.lock"
 
 
+@unittest.skipIf(os.name == "nt", "POSIX direct-executable runtime tests")
 class LockedRuntimeTests(unittest.TestCase):
     def copy_runtime(self, directory: Path, *, include_lock: bool = True) -> Path:
         sidecar = directory / SIDECAR.name

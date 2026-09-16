@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import contextlib
+import hashlib
 import json
 import os
 import re
@@ -11,8 +13,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
+
+if os.name == "nt":
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import granted_auto_windows as windows
 
 
 PLAYWRIGHT_VERSION = "1.62.0"
@@ -20,11 +28,16 @@ CONTROLLER = Path(__file__).resolve()
 SCRIPTS_DIR = CONTROLLER.parent
 SIDECAR = SCRIPTS_DIR / "granted_auto_auth.py"
 LOCKFILE = SCRIPTS_DIR / "granted_auto_auth.py.lock"
+SUPERVISOR = SCRIPTS_DIR / "granted_auto_auth_supervisor.py"
+SUPERVISOR_LOCKFILE = SCRIPTS_DIR / "granted_auto_auth_supervisor.py.lock"
 STATE_DIR = Path.home() / ".config/granted-auto-auth"
 STATE_FILE = STATE_DIR / "install.toml"
 CREDENTIALS_FILE = STATE_DIR / "credentials.toml"
 GRANTED_CONFIG = Path.home() / ".granted/config"
 AWS_CONFIG = Path.home() / ".aws/config"
+KEYRING_DIR = Path.home() / ".local/share/granted-auto-auth/granted-keyring"
+TRANSACTION_LOCK = STATE_DIR / "locks/install.lock"
+KEYRING_CREDENTIAL_TARGET = "granted-auto-auth/file-keyring-password/v1"
 CONTAINER_MARKER = Path("/.dockerenv")
 OS_RELEASE = Path("/etc/os-release")
 PROC_ROOT = Path("/proc")
@@ -44,6 +57,11 @@ def _validate_file(path: Path, result: os.stat_result, allowed_mode: int = 0o600
 
 
 def read_secure_toml(path: Path) -> dict[str, object]:
+    if os.name == "nt":
+        try:
+            return tomllib.loads(windows.read_secure_bytes(path).decode())
+        except UnicodeDecodeError as error:
+            raise ControllerError(f"unable to read {path.name}") from error
     parent = os.lstat(path.parent)
     if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
         raise ControllerError(f"{path.parent.name} is not a real directory")
@@ -74,6 +92,10 @@ def _toml_value(value: object) -> str:
 
 
 def write_state(values: dict[str, object]) -> None:
+    if os.name == "nt":
+        data = "".join(f"{key} = {_toml_value(value)}\n" for key, value in values.items()).encode()
+        windows.write_secure_bytes(STATE_FILE, data)
+        return
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(STATE_DIR, 0o700)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".install.", suffix=".tmp", dir=STATE_DIR)
@@ -99,6 +121,8 @@ def write_state(values: dict[str, object]) -> None:
 
 def granted_config() -> dict[str, object]:
     try:
+        if os.name == "nt":
+            return tomllib.loads(windows.read_secure_bytes(GRANTED_CONFIG).decode())
         with GRANTED_CONFIG.open("rb") as stream:
             return tomllib.load(stream)
     except (FileNotFoundError, tomllib.TOMLDecodeError) as error:
@@ -125,6 +149,437 @@ def run_checked(arguments: list[str], *, capture: bool = False) -> subprocess.Co
         )
     except (FileNotFoundError, subprocess.CalledProcessError) as error:
         raise ControllerError(f"command failed: {Path(arguments[0]).name}") from error
+
+
+def _windows_executable(path: Path) -> bool:
+    return path.is_file() and (os.name == "nt" or os.access(path, os.X_OK))
+
+
+def _windows_uv_path() -> str:
+    value = os.environ.get("GRANTED_AUTO_AUTH_UV", "") or shutil.which("uv.exe") or shutil.which("uv") or ""
+    if not value:
+        raise ControllerError("uv.exe is missing; install uv, then run: granted-auto-auth install")
+    try:
+        result = windows.canonical_path(value)
+    except OSError as error:
+        raise ControllerError("uv.exe path is invalid") from error
+    if Path(result).name.lower() != "uv.exe":
+        raise ControllerError("resolved uv executable is invalid")
+    return result
+
+
+def _windows_launch_command(uv_path: str) -> str:
+    return f'"{uv_path}" run --script --locked --offline "{windows.canonical_path(SIDECAR)}" "{{{{.URL}}}}"'
+
+
+def _config_snapshot() -> tuple[bytes, str]:
+    data = windows.read_secure_bytes(GRANTED_CONFIG)
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _owned_config_fragments(data: bytes) -> tuple[str, str, str]:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError as error:
+        raise ControllerError("Granted config must be UTF-8") from error
+    custom = re.search(r"(?m)^CustomSSOBrowserPath\s*=.*(?:\r?\n|\Z)", text)
+    template = re.search(r"(?ms)^\[SSOBrowserLaunchTemplate\]\s*\r?\n.*?(?=^\[|\Z)", text)
+    keyring = re.search(r"(?ms)^\[Keyring\]\s*\r?\n.*?(?=^\[|\Z)", text)
+    return (
+        custom.group(0) if custom else "",
+        template.group(0) if template else "",
+        keyring.group(0) if keyring else "",
+    )
+
+
+def _patch_owned_config(data: bytes, custom_fragment: str, template_fragment: str, keyring_fragment: str) -> bytes:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError as error:
+        raise ControllerError("Granted config must be UTF-8") from error
+    text = re.sub(r"(?m)^CustomSSOBrowserPath\s*=.*(?:\r?\n|\Z)", "", text)
+    text = re.sub(r"(?ms)^\[SSOBrowserLaunchTemplate\]\s*\r?\n.*?(?=^\[|\Z)", "", text)
+    text = re.sub(r"(?ms)^\[Keyring\]\s*\r?\n.*?(?=^\[|\Z)", "", text)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    additions = ""
+    if custom_fragment:
+        additions += custom_fragment.rstrip("\r\n") + newline
+    if template_fragment:
+        additions += template_fragment.rstrip("\r\n") + newline
+    if keyring_fragment:
+        additions += keyring_fragment.rstrip("\r\n") + newline
+    if additions:
+        text = text.rstrip("\r\n") + newline + additions
+    return text.encode()
+
+
+def _installed_template(command: str, newline: str = "\n") -> str:
+    return (
+        f"[SSOBrowserLaunchTemplate]{newline}"
+        f"Command = {json.dumps(command)}{newline}"
+        f"UseForkProcess = false{newline}"
+    )
+
+
+def _installed_keyring(file_dir: str, newline: str = "\n") -> str:
+    return (
+        f"[Keyring]{newline}"
+        f"Backend = \"file\"{newline}"
+        f"FileDir = {json.dumps(file_dir)}{newline}"
+    )
+
+
+def _windows_settings() -> tuple[str, dict[str, object] | None, dict[str, object] | None]:
+    config = granted_config()
+    custom = config.get("CustomSSOBrowserPath", "")
+    template = config.get("SSOBrowserLaunchTemplate")
+    keyring = config.get("Keyring")
+    if not isinstance(custom, str):
+        raise ControllerError("Granted CustomSSOBrowserPath is invalid")
+    if template is not None and not isinstance(template, dict):
+        raise ControllerError("Granted SSOBrowserLaunchTemplate is invalid")
+    if keyring is not None and not isinstance(keyring, dict):
+        raise ControllerError("Granted Keyring is invalid")
+    return custom, template, keyring
+
+
+def _windows_template_matches(command: str) -> bool:
+    try:
+        custom, template, _ = _windows_settings()
+    except ControllerError:
+        return False
+    return (
+        custom == ""
+        and isinstance(template, dict)
+        and template.get("Command") == command
+        and template.get("UseForkProcess", False) is False
+    )
+
+
+def _windows_keyring_matches(file_dir: str) -> bool:
+    try:
+        _, _, keyring = _windows_settings()
+        configured = str(keyring.get("FileDir", "")) if isinstance(keyring, dict) else ""
+        return (
+            isinstance(keyring, dict)
+            and set(keyring) == {"Backend", "FileDir"}
+            and keyring.get("Backend") == "file"
+            and windows.canonical_path(configured) == file_dir
+        )
+    except (ControllerError, OSError):
+        return False
+
+
+def _windows_owned_settings_match(command: str, file_dir: str) -> bool:
+    return _windows_template_matches(command) and _windows_keyring_matches(file_dir)
+
+
+def _windows_keyring_migration_allowed() -> bool:
+    _, _, keyring = _windows_settings()
+    if keyring is None:
+        return True
+    return set(keyring) <= {"Backend"} and keyring.get("Backend", "") in {"", "wincred"}
+
+
+def _windows_base_state(
+    data: bytes, fingerprint: str, command: str, uv_path: str, file_dir: str, directory_created: bool,
+) -> dict[str, object]:
+    custom, template, keyring = _owned_config_fragments(data)
+    return {
+        "phase": "prepared",
+        "previous_custom_fragment": custom,
+        "previous_template_fragment": template,
+        "previous_keyring_fragment": keyring,
+        "installed_launch_template": command,
+        "installed_keyring_dir": file_dir,
+        "keyring_credential_target": KEYRING_CREDENTIAL_TARGET,
+        "keyring_credential_created": False,
+        "keyring_credential_hash": "",
+        "keyring_dir_created": directory_created,
+        "config_fingerprint": fingerprint,
+        "executable_path": str(SIDECAR),
+        "supervisor_path": str(SCRIPTS_DIR / "granted_auto_auth_supervisor.py"),
+        "uv_path": uv_path,
+        "chromium_path": "",
+        "playwright_version": PLAYWRIGHT_VERSION,
+        "chromium_revision": "",
+    }
+
+
+def _windows_restore_config(state: dict[str, object], *, require_installed: bool) -> None:
+    current, fingerprint = _config_snapshot()
+    command = state.get("installed_launch_template")
+    if not isinstance(command, str):
+        raise ControllerError("installed launch template is invalid")
+    file_dir = state.get("installed_keyring_dir")
+    if not isinstance(file_dir, str):
+        raise ControllerError("installed keyring directory is invalid")
+    installed = _windows_owned_settings_match(command, file_dir)
+    expected_fingerprint = state.get("config_fingerprint")
+    if require_installed and not installed:
+        raise ControllerError("refusing to overwrite unrelated Granted browser setting")
+    if not require_installed and not installed and fingerprint != expected_fingerprint:
+        raise ControllerError("partial install conflicts with newer Granted config")
+    custom = state.get("previous_custom_fragment")
+    template = state.get("previous_template_fragment")
+    keyring = state.get("previous_keyring_fragment")
+    if not isinstance(custom, str) or not isinstance(template, str) or not isinstance(keyring, str):
+        raise ControllerError("saved Granted settings are invalid")
+    windows.write_secure_bytes(GRANTED_CONFIG, _patch_owned_config(current, custom, template, keyring))
+
+
+@contextlib.contextmanager
+def _windows_transaction():
+    windows.ensure_restricted_directory(STATE_DIR)
+    windows.ensure_restricted_file(TRANSACTION_LOCK)
+    lock = windows.lock_file(TRANSACTION_LOCK, time.monotonic_ns(), "installation transaction")
+    try:
+        yield
+    finally:
+        windows.unlock_file(*lock)
+
+
+def _windows_prepare_keyring_directory() -> tuple[str, bool]:
+    created = not KEYRING_DIR.exists()
+    windows.ensure_restricted_directory(KEYRING_DIR)
+    return windows.canonical_path(KEYRING_DIR), created
+
+
+def _windows_keyring_directory_empty() -> bool:
+    handle = windows.secure_open(KEYRING_DIR, directory=True)
+    try:
+        return next(KEYRING_DIR.iterdir(), None) is None
+    finally:
+        windows.close_handle(handle)
+
+
+def _windows_prepare_keyring_credential(state: dict[str, object], *, allow_existing: bool) -> None:
+    if state.get("keyring_credential_target") != KEYRING_CREDENTIAL_TARGET:
+        raise ControllerError("managed Windows credential target is invalid")
+    value = windows.credential_read(KEYRING_CREDENTIAL_TARGET)
+    expected_hash = state.get("keyring_credential_hash", "")
+    if value is not None:
+        actual_hash = hashlib.sha256(value.encode()).hexdigest()
+        if not allow_existing or not isinstance(expected_hash, str) or actual_hash != expected_hash:
+            raise ControllerError("managed Windows credential exists without matching install ownership")
+        return
+    if not _windows_keyring_directory_empty():
+        raise ControllerError("managed keyring password is missing while encrypted cache is nonempty; restore the credential")
+    value = windows.generate_keyring_password()
+    state["keyring_credential_hash"] = hashlib.sha256(value.encode()).hexdigest()
+    state["phase"] = "storage_prepared"
+    write_state(state)
+    windows.credential_create(value, KEYRING_CREDENTIAL_TARGET)
+    state["keyring_credential_created"] = True
+    write_state(state)
+
+
+def _windows_cleanup_new_storage(state: dict[str, object]) -> None:
+    expected_hash = state.get("keyring_credential_hash", "")
+    value = windows.credential_read(KEYRING_CREDENTIAL_TARGET)
+    transaction_owned = state.get("keyring_credential_created") or state.get("phase") == "storage_prepared"
+    if transaction_owned and value is not None and isinstance(expected_hash, str) and hashlib.sha256(value.encode()).hexdigest() == expected_hash:
+        windows.credential_delete(KEYRING_CREDENTIAL_TARGET)
+    if state.get("keyring_dir_created") and KEYRING_DIR.exists() and _windows_keyring_directory_empty():
+        KEYRING_DIR.rmdir()
+
+
+def _windows_enabled() -> bool:
+    try:
+        state = read_secure_toml(STATE_FILE)
+        command = str(state.get("installed_launch_template", ""))
+        chromium = str(state.get("chromium_path", ""))
+        revision = str(state.get("chromium_revision", ""))
+        supervisor = Path(str(state.get("supervisor_path", "")))
+        file_dir = str(state.get("installed_keyring_dir", ""))
+        credential = windows.credential_read(KEYRING_CREDENTIAL_TARGET)
+        credential_hash = str(state.get("keyring_credential_hash", ""))
+        directory = windows.secure_open(KEYRING_DIR, directory=True)
+        windows.close_handle(directory)
+        return all((
+            state.get("phase") == "configured",
+            state.get("playwright_version") == PLAYWRIGHT_VERSION,
+            state.get("uv_path") == _windows_uv_path(),
+            state.get("executable_path") == str(SIDECAR),
+            supervisor == SCRIPTS_DIR / "granted_auto_auth_supervisor.py",
+            supervisor.is_file(),
+            supervisor.with_suffix(".py.lock").is_file(),
+            SIDECAR.is_file(), LOCKFILE.is_file(),
+            state.get("keyring_credential_target") == KEYRING_CREDENTIAL_TARGET,
+            bool(credential), hashlib.sha256(str(credential).encode()).hexdigest() == credential_hash,
+            windows.canonical_path(KEYRING_DIR) == file_dir,
+            _windows_owned_settings_match(command, file_dir),
+            bool(revision), f"chromium-{revision}" in chromium,
+            Path(chromium).is_file(),
+            not platform_health(),
+        ))
+    except (ControllerError, FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError):
+        return False
+
+
+def _windows_prepare_browser_state() -> None:
+    root = Path.home() / ".local/share/granted-auto-auth"
+    browser = root / "browser"
+    windows.ensure_restricted_directory(root)
+    windows.ensure_restricted_directory(browser)
+    windows.write_secure_bytes(root / "browser.lock", b"")
+
+
+def _windows_apply_install_config(
+    state: dict[str, object], command: str, file_dir: str, expected_fingerprint: str,
+) -> None:
+    current, current_fingerprint = _config_snapshot()
+    if current_fingerprint != expected_fingerprint:
+        raise ControllerError("Granted config changed during install")
+    newline = "\r\n" if b"\r\n" in current else "\n"
+    updated = _patch_owned_config(
+        current, "", _installed_template(command, newline), _installed_keyring(file_dir, newline)
+    )
+    windows.write_secure_bytes(GRANTED_CONFIG, updated)
+    if not _windows_owned_settings_match(command, file_dir):
+        raise ControllerError("Granted browser or keyring settings did not persist")
+    state["phase"] = "configured"
+    state["installed_launch_template"] = command
+    state["config_fingerprint"] = hashlib.sha256(updated).hexdigest()
+    write_state(state)
+
+
+def _windows_resynchronize_configured(state: dict[str, object]) -> None:
+    previous_state = dict(state)
+    installed = state.get("installed_launch_template")
+    uv_path = _windows_uv_path()
+    command = _windows_launch_command(uv_path)
+    if not isinstance(installed, str) or not (
+        _windows_template_matches(installed) or _windows_template_matches(command)
+    ):
+        raise ControllerError("configured Windows install does not own current Granted settings")
+    before, original_fingerprint = _config_snapshot()
+    migration = "installed_keyring_dir" not in state
+    try:
+        if migration:
+            if not _windows_keyring_migration_allowed():
+                raise ControllerError("configured Windows install does not own current Granted keyring settings")
+            _, _, previous_keyring = _owned_config_fragments(before)
+            file_dir, directory_created = _windows_prepare_keyring_directory()
+            state.update(
+                phase="prepared",
+                previous_keyring_fragment=previous_keyring,
+                installed_keyring_dir=file_dir,
+                keyring_credential_target=KEYRING_CREDENTIAL_TARGET,
+                keyring_credential_created=False,
+                keyring_credential_hash="",
+                keyring_dir_created=directory_created,
+                config_fingerprint=original_fingerprint,
+            )
+            write_state(state)
+            _windows_prepare_keyring_credential(state, allow_existing=False)
+        else:
+            file_dir = str(state.get("installed_keyring_dir", ""))
+            if not file_dir or state.get("keyring_credential_target") != KEYRING_CREDENTIAL_TARGET:
+                raise ControllerError("configured Windows keyring install state is invalid")
+            if not _windows_keyring_matches(file_dir):
+                raise ControllerError("configured Windows install does not own current Granted keyring settings")
+            windows.ensure_restricted_directory(KEYRING_DIR)
+            if windows.canonical_path(KEYRING_DIR) != file_dir:
+                raise ControllerError("configured Windows keyring directory changed")
+            _windows_prepare_keyring_credential(state, allow_existing=True)
+            state["phase"] = "configured"
+            write_state(state)
+        chromium, revision = provision_chromium()
+        _, fingerprint = _config_snapshot()
+        state.update(
+            executable_path=str(SIDECAR),
+            supervisor_path=str(SUPERVISOR),
+            uv_path=uv_path,
+            installed_launch_template=command,
+            chromium_path=chromium,
+            chromium_revision=revision,
+            playwright_version=PLAYWRIGHT_VERSION,
+            config_fingerprint=fingerprint,
+        )
+        write_state(state)
+        if not _windows_owned_settings_match(command, file_dir):
+            _windows_apply_install_config(state, command, file_dir, fingerprint)
+        if not _windows_enabled():
+            raise ControllerError("Windows install resynchronization did not restore readiness")
+    except Exception:
+        if migration:
+            current, current_fingerprint = _config_snapshot()
+            if current_fingerprint != original_fingerprint:
+                if not _windows_owned_settings_match(command, str(state.get("installed_keyring_dir", ""))):
+                    raise ControllerError("hybrid storage rollback conflicts with newer Granted config")
+                windows.write_secure_bytes(GRANTED_CONFIG, before)
+            _windows_cleanup_new_storage(state)
+            write_state(previous_state)
+        raise
+    print("granted-auto-auth installation resynchronized")
+
+
+def _windows_install_locked() -> None:
+    _windows_prepare_browser_state()
+    if _windows_enabled():
+        sync_sidecar_runtime()
+        print("granted-auto-auth is already installed")
+        return
+    if STATE_FILE.exists():
+        state = read_secure_toml(STATE_FILE)
+        phase = state.get("phase")
+        if phase == "configured":
+            _windows_resynchronize_configured(state)
+            return
+        if phase == "uninstalling":
+            raise ControllerError("existing Windows install requires uninstall or recovery")
+        _windows_restore_config(state, require_installed=False)
+        _windows_cleanup_new_storage(state)
+        STATE_FILE.unlink()
+    uv_path = _windows_uv_path()
+    before, fingerprint = _config_snapshot()
+    if not _windows_keyring_migration_allowed():
+        raise ControllerError("Granted Keyring Backend must be absent or wincred before install")
+    command = _windows_launch_command(uv_path)
+    file_dir, directory_created = _windows_prepare_keyring_directory()
+    state = _windows_base_state(before, fingerprint, command, uv_path, file_dir, directory_created)
+    write_state(state)
+    try:
+        _windows_prepare_keyring_credential(state, allow_existing=False)
+        chromium, revision = provision_chromium()
+        state.update(phase="chromium_ready", chromium_path=chromium, chromium_revision=revision)
+        write_state(state)
+        _windows_apply_install_config(state, command, file_dir, fingerprint)
+    except Exception:
+        try:
+            _windows_restore_config(state, require_installed=_windows_owned_settings_match(command, file_dir))
+            _windows_cleanup_new_storage(state)
+            STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    print("granted-auto-auth installed")
+
+
+def _windows_install() -> None:
+    with _windows_transaction():
+        _windows_install_locked()
+
+
+def _windows_uninstall_locked() -> None:
+    state = read_secure_toml(STATE_FILE)
+    if state.get("phase") != "configured":
+        raise ControllerError("Windows install state is not configured")
+    command = state.get("installed_launch_template")
+    file_dir = state.get("installed_keyring_dir")
+    if not isinstance(command, str) or not isinstance(file_dir, str) or not _windows_owned_settings_match(command, file_dir):
+        raise ControllerError("refusing to overwrite unrelated Granted browser or keyring setting")
+    state["phase"] = "uninstalling"
+    write_state(state)
+    _windows_restore_config(state, require_installed=True)
+    STATE_FILE.unlink()
+    print("granted-auto-auth uninstalled; Chromium, browser profile, encrypted cache, and managed password were preserved")
+
+
+def _windows_uninstall() -> None:
+    with _windows_transaction():
+        _windows_uninstall_locked()
 
 
 def set_custom_browser(value: str) -> None:
@@ -207,18 +662,25 @@ def rollback_install(previous: str) -> None:
 
 
 def sync_sidecar_runtime() -> None:
-    if not SIDECAR.is_file() or not LOCKFILE.is_file():
-        raise ControllerError("sidecar or script lock is missing")
-    run_checked(["uv", "lock", "--check", "--script", str(SIDECAR)])
-    run_checked(["uv", "sync", "--locked", "--script", str(SIDECAR)])
+    if not SIDECAR.is_file() or not LOCKFILE.is_file() or (os.name == "nt" and (not SUPERVISOR.is_file() or not SUPERVISOR_LOCKFILE.is_file())):
+        raise ControllerError("sidecar, supervisor, or script lock is missing")
+    uv = _windows_uv_path() if os.name == "nt" else "uv"
+    sidecar = windows.canonical_path(SIDECAR) if os.name == "nt" else str(SIDECAR)
+    run_checked([uv, "lock", "--check", "--script", sidecar])
+    run_checked([uv, "sync", "--locked", "--script", sidecar])
+    if os.name == "nt":
+        supervisor = windows.canonical_path(SUPERVISOR)
+        run_checked([uv, "lock", "--check", "--script", supervisor])
+        run_checked([uv, "sync", "--locked", "--script", supervisor])
 
 
 def provision_chromium() -> tuple[str, str]:
     sync_sidecar_runtime()
-    run_checked(["uv", "run", "--with", f"playwright=={PLAYWRIGHT_VERSION}", "playwright", "install", "chromium"])
+    uv = _windows_uv_path() if os.name == "nt" else "uv"
+    run_checked([uv, "run", "--with", f"playwright=={PLAYWRIGHT_VERSION}", "playwright", "install", "chromium"])
     probe = run_checked(
         [
-            "uv",
+            uv,
             "run",
             "--offline",
             "--with",
@@ -231,7 +693,7 @@ def provision_chromium() -> tuple[str, str]:
     )
     chromium = probe.stdout.strip()
     path = Path(chromium)
-    if not path.is_file() or not os.access(path, os.X_OK):
+    if not _windows_executable(path):
         raise ControllerError("provisioned Chromium executable is missing")
     revision_match = re.search(r"chromium-[^/]*?(\d+)", chromium)
     revision = revision_match.group(1) if revision_match else path.parent.name
@@ -341,6 +803,15 @@ def _secret_service_health() -> list[str]:
 
 
 def platform_health() -> list[str]:
+    if os.name == "nt":
+        failures: list[str] = []
+        if sys.maxsize <= 2**32:
+            failures.append("Windows x64 Python is required")
+        try:
+            windows.current_sid_string()
+        except OSError:
+            failures.append("Windows security APIs are unavailable")
+        return failures
     if sys.platform == "darwin":
         return _darwin_process_health()
     if sys.platform.startswith("linux"):
@@ -352,6 +823,8 @@ def platform_health() -> list[str]:
 
 
 def enabled() -> bool:
+    if os.name == "nt":
+        return _windows_enabled()
     try:
         state = read_secure_toml(STATE_FILE)
         chromium = str(state.get("chromium_path", ""))
@@ -377,6 +850,9 @@ def enabled() -> bool:
 
 
 def install() -> None:
+    if os.name == "nt":
+        _windows_install()
+        return
     if enabled():
         sync_sidecar_runtime()
         print("granted-auto-auth is already installed")
@@ -404,6 +880,9 @@ def install() -> None:
 
 
 def uninstall() -> None:
+    if os.name == "nt":
+        _windows_uninstall()
+        return
     state = read_secure_toml(STATE_FILE)
     expected = state.get("executable_path")
     if not _owned_sidecar_path(expected) or custom_sso_browser_path() != expected:
@@ -478,14 +957,36 @@ def doctor() -> int:
                 "DisableCredentialProcessCache must be false; run: granted settings set --setting "
                 "DisableCredentialProcessCache --value false"
             )
+        if os.name == "nt":
+            keyring = config.get("Keyring")
+            if not isinstance(keyring, dict) or keyring.get("Backend") != "file":
+                failures.append("Granted Keyring Backend must be file on Windows; run: granted-auto-auth install")
+            try:
+                expected_keyring_dir = windows.canonical_path(KEYRING_DIR)
+                if isinstance(keyring, dict) and keyring.get("Backend") == "file" and not _windows_keyring_matches(expected_keyring_dir):
+                    failures.append("Granted Keyring FileDir is not managed by granted-auto-auth")
+                credential = windows.credential_read(KEYRING_CREDENTIAL_TARGET)
+                if not credential:
+                    failures.append("managed Windows keyring password is missing; run: granted-auto-auth install")
+                handle = windows.secure_open(KEYRING_DIR, directory=True)
+                windows.close_handle(handle)
+            except (OSError, PermissionError):
+                failures.append("managed Windows keyring storage is unavailable or unsafe")
     except ControllerError as error:
         failures.append(str(error))
     failures.extend(platform_health())
     if not enabled():
         failures.append("installation is not enabled; run: granted-auto-auth install")
     browser_dir = Path.home() / ".local/share/granted-auto-auth/browser"
-    if browser_dir.exists() and (browser_dir.stat().st_uid != os.getuid() or stat.S_IMODE(browser_dir.stat().st_mode) & ~0o700):
-        failures.append("browser profile permissions are too permissive")
+    if browser_dir.exists():
+        if os.name == "nt":
+            try:
+                handle = windows.secure_open(browser_dir, directory=True)
+                windows.close_handle(handle)
+            except (OSError, PermissionError):
+                failures.append("browser profile ACL or reparse state is unsafe")
+        elif browser_dir.stat().st_uid != os.getuid() or stat.S_IMODE(browser_dir.stat().st_mode) & ~0o700:
+            failures.append("browser profile permissions are too permissive")
     legacy = _legacy_profiles()
     if legacy:
         warnings.append(f"legacy inline SSO profiles detected: {len(legacy)}")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import importlib.util
 import os
 import shlex
@@ -13,6 +12,9 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+if os.name != "nt":
+    import fcntl
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,7 @@ class URLTests(unittest.TestCase):
         self.assertFalse(sidecar.is_callback_url("https://example.com/oauth/callback"))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX credential security tests")
 class CredentialTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -145,6 +148,7 @@ class CredentialTests(unittest.TestCase):
             sidecar.load_chromium_path(state)
 
 
+@unittest.skipIf(os.name == "nt", "POSIX process and lock tests")
 class DeadlineAndProcessTests(unittest.TestCase):
     def test_missing_deadline_fails_closed(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):

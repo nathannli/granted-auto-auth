@@ -19,6 +19,7 @@ LOADER.exec_module(controller)
 real_platform_health = controller.platform_health
 
 
+@unittest.skipIf(os.name == "nt", "POSIX controller tests")
 class ControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

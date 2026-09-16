@@ -15,6 +15,7 @@ SHIM = ROOT / "scripts/granted-auto-auth-bin/assumego"
 SIDECAR = ROOT / "scripts/granted_auto_auth.py"
 
 
+@unittest.skipIf(os.name == "nt", "POSIX process-group shim tests")
 class ShimTests(unittest.TestCase):
     def helper(self, directory: Path, body: str) -> Path:
         path = directory / "real-assumego"
