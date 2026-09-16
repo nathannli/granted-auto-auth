@@ -4,3 +4,5 @@ install.toml
 .reposcryignore
 __pycache__/
 .pytest_cache/
+.zvec-grep/
+.pi/
