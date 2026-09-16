@@ -10,6 +10,7 @@
 | Ubuntu 24.04 | Fish 4.x | Supported |
 | Ubuntu 24.04 | Bash 5.x | Supported |
 | Kubuntu 26.04 | Bash 5.x | Supported |
+| Windows 11 x64 | PowerShell 7.x | Supported |
 
 Other operating-system or shell versions, Linux distributions, macOS with Bash, and other shells are outside the supported matrix. The core controller verifies the operating-system family and Linux distribution; the bundled shell adapter verifies the shell combination.
 
@@ -22,15 +23,17 @@ Tested combinations:
 | macOS Tahoe | Fish 4.x | Login Keychain |
 | Ubuntu 24.04 GNOME | Fish 4.x and Bash 5.x | `gnome-keyring-daemon` |
 | Kubuntu 26.04 KDE | Bash 5.x | KWallet 6 `ksecretd` |
+| Windows 11 x64 | PowerShell 7.x | WinCred password + Granted encrypted-file keyring |
 
 ## Requirements
 
 - Git
 - [uv](https://docs.astral.sh/uv/) with access to Python 3.12 or newer
 - [Granted](https://docs.commonfate.io/granted/getting-started) v0.39.x, with both `granted` and `assumego` on `PATH`
-- Fish 4.x or Bash 5.x configured to source the bundled adapter
+- Fish 4.x, Bash 5.x, or PowerShell 7.x configured to source the bundled adapter
 - Network access during `install` to resolve the locked script environment and download Chromium
 - On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon` or KWallet `ksecretd`
+- On Windows: Windows 11 x64 and NTFS state directories; `install` migrates an absent or `wincred` backend to the managed encrypted-file keyring
 
 Authentication runs from the locked local environment with no dependency downloads after installation.
 
@@ -52,12 +55,18 @@ git -C "$HOME/.config/granted-auto-auth" pull --ff-only
 
 ### 2. Add the controller to `PATH`
 
-The executable is in the repository's `scripts` directory, not its root.
+On macOS or Ubuntu, create a symbolic link in `$HOME/.local/bin`:
+
+```sh
+sh "$HOME/.config/granted-auto-auth/scripts/link-local-bin.sh"
+```
+
+The script is idempotent and refuses to replace an unrelated file or symbolic link. Ensure `$HOME/.local/bin` is on `PATH`.
 
 Fish on macOS or Ubuntu:
 
 ```fish
-fish_add_path "$HOME/.config/granted-auto-auth/scripts"
+fish_add_path "$HOME/.local/bin"
 source "$HOME/.config/granted-auto-auth/adapters/fish/assume.fish"
 ```
 
@@ -66,7 +75,7 @@ Put the `source` line in `$HOME/.config/fish/config.fish`. `fish_add_path` persi
 Bash on Ubuntu: add the following line to `$HOME/.bashrc`:
 
 ```bash
-export PATH="$HOME/.config/granted-auto-auth/scripts:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 source "$HOME/.config/granted-auto-auth/adapters/bash/assume.bash"
 ```
 
@@ -76,7 +85,26 @@ Load the change:
 source "$HOME/.bashrc"
 ```
 
-Verify the resolved command:
+PowerShell 7 on Windows: create the symbolic link:
+
+```powershell
+& "$HOME\.config\granted-auto-auth\scripts\link-local-bin.ps1"
+```
+
+The script follows the PowerShell `softlink` helper pattern and opens a UAC elevation prompt when required. Add these lines to `$PROFILE`:
+
+```powershell
+$env:PATH = "$HOME\.local\bin;$env:PATH"
+. "$HOME\.config\granted-auto-auth\adapters\pwsh\assume.ps1"
+```
+
+Load the change without changing execution policy:
+
+```powershell
+. $PROFILE
+```
+
+On macOS or Ubuntu, verify the resolved command:
 
 ```sh
 command -v granted-auto-auth
@@ -85,7 +113,13 @@ command -v granted-auto-auth
 It should resolve to:
 
 ```text
-$HOME/.config/granted-auto-auth/scripts/granted-auto-auth
+$HOME/.local/bin/granted-auto-auth
+```
+
+On Windows, verify `Get-Command granted-auto-auth` resolves to:
+
+```text
+$HOME\.local\bin\granted-auto-auth.ps1
 ```
 
 ### 3. Create the credential file
@@ -117,6 +151,18 @@ The directory must be owned by the current user with mode `0700`. The credential
 
 The credential file is plaintext protected by local file ownership and permissions; it is not stored in the system keyring. Use this only on a trusted, encrypted workstation account. Granted's SSO-token cache remains separate and uses its configured secure-storage backend.
 
+On Windows, create the file on NTFS and restrict it to the current user, `SYSTEM`, and `BUILTIN\Administrators`:
+
+```powershell
+$directory = "$HOME\.config\granted-auto-auth"
+$credential = Join-Path $directory "credentials.toml"
+New-Item -ItemType Directory -Force $directory | Out-Null
+Copy-Item "$directory\examples\granted-auto-auth.credentials.toml" $credential
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $directory /inheritance:r /grant:r "*${sid}:(OI)(CI)(F)" "*S-1-5-18:(OI)(CI)(F)" "*S-1-5-32-544:(OI)(CI)(F)"
+icacls $credential /inheritance:r /grant:r "*${sid}:(F)" "*S-1-5-18:(F)" "*S-1-5-32-544:(F)"
+```
+
 ### 4. Configure Granted
 
 The controller requires authorization-code flow and Granted's credential-process cache:
@@ -126,7 +172,7 @@ granted settings set --setting UseAuthorizationCode --value true
 granted settings set --setting DisableCredentialProcessCache --value false
 ```
 
-`install` changes only `CustomSSOBrowserPath`. It records the previous value so `uninstall` can restore it.
+On macOS and Ubuntu, `install` changes only `CustomSSOBrowserPath`. On Windows, it installs `[SSOBrowserLaunchTemplate]` and a managed `[Keyring] Backend = "file"`, clears the conflicting custom path, and records all previous values for guarded restoration.
 
 #### How Granted configuration changes
 
@@ -170,6 +216,12 @@ The default collection must already be unlocked. On Kubuntu, log in to the KDE d
 
 The readiness check resolves the process that owns `org.freedesktop.secrets`, requires it to belong to the current user, and reads only the default collection's `Locked` property. It does not enumerate or modify wallet items. If readiness fails, `doctor` prints the corrective action in the same `FAIL:` line.
 
+#### Windows secure storage
+
+WinCred cannot store some IAM Identity Center tokens because generic credential blobs are limited to 2560 bytes. Windows installation therefore stores only one random file-keyring password in the local machine Credential Manager target `granted-auto-auth/file-keyring-password/v1`. Granted stores tokens in its encrypted `file` backend under `$HOME/.local/share/granted-auto-auth/granted-keyring`.
+
+The locked Windows supervisor reads the password immediately before starting Granted, sets `CF_KEYRING_FILE_PASSWORD` only in its child process tree, and removes its own value after Granted exits. PowerShell never receives or prints the managed password. Installation refuses to replace an existing unowned target, generate a new password over a nonempty encrypted cache, or adopt another file-keyring directory.
+
 ### 5. Install the browser runtime
 
 ```sh
@@ -192,11 +244,29 @@ granted-auto-auth doctor
 granted-auto-auth-doctor
 ```
 
-The shell diagnostic ends with `OK: Fish adapter is ready` or `OK: Bash adapter is ready`.
+The shell diagnostic ends with `OK: Fish adapter is ready`, `OK: Bash adapter is ready`, or `OK: PowerShell adapter is ready`.
+
+### 7. Configure Granted Containers for console access
+
+ssume <profile> <service> and ssume <profile> --console support Granted Containers
+xt+granted-containers: URIs for Firefox-based browsers.  Without this step the console
+launches with a plain HTTPS URL.
+
+On Windows with Zen Browser and the
+[Granted Containers](https://addons.mozilla.org/en-GB/firefox/addon/granted) extension:
+
+```powershell
+granted settings set --setting DefaultBrowser --value ZEN
+granted settings set --setting CustomBrowserPath --value "C:\Program Files\Zen Browser\zen.exe"
+```
+
+On macOS or Linux with Zen, set ZEN and the install path.  Other Firefox-based browsers
+use FIREFOX or WATERFOX instead.
+
 
 ## Shell integration contract
 
-This repository is independent of Fish and Bash dotfile repositories and publishes both generic adapters itself. Each adapter:
+This repository is independent of Fish, Bash, and PowerShell profile repositories and publishes all generic adapters itself. Each adapter:
 
 1. Resolve the real `assumego` executable before prepending the private shim directory.
 2. Export that absolute path as `GRANTED_AUTO_AUTH_REAL_ASSUMEGO`.
@@ -205,6 +275,8 @@ This repository is independent of Fish and Bash dotfile repositories and publish
 5. Reuse an existing deadline for nested calls.
 6. Restore the caller's `PATH` and `GRANTED_AUTO_AUTH_*` environment after the call.
 7. Preserve Granted's exit status and stop on deadline exit `124` rather than retrying.
+
+Deadline exit `124` and Ctrl+C exit `130` terminate the complete owned tree. On successful Granted exit the supervisor removes the kill-on-close flag so the browser-child process can complete the tab handoff.
 
 The private `assumego` shim and browser sidecar are implementation details. Do not invoke them directly.
 
@@ -239,6 +311,7 @@ granted-auto-auth install
 - Requires network access for initial dependency and Chromium installation.
 - Verifies the script lock before modifying Granted.
 - Saves the current `CustomSSOBrowserPath`.
+- On Windows, saves the current `[Keyring]`, creates or verifies the restricted encrypted cache, and configures the hybrid WinCred/file backend.
 - Installs the matching Chromium revision.
 - Sets `CustomSSOBrowserPath` to the repository sidecar.
 - Rolls back the Granted setting if installation fails.
@@ -275,6 +348,7 @@ Runs authentication-free diagnostics for:
 - `UseAuthorizationCode=true`;
 - `DisableCredentialProcessCache=false`;
 - current installation and Chromium state;
+- on Windows, the exact managed file-keyring directory and WinCred password target without reading token contents;
 - macOS `libproc` or Ubuntu `/proc` support;
 - Ubuntu Secret Service availability, owner, and default-collection lock state;
 - dedicated browser-profile ownership and permissions;
@@ -288,11 +362,11 @@ Runs authentication-free diagnostics for:
 granted-auto-auth uninstall
 ```
 
-- Refuses to overwrite a Granted browser setting that no longer matches this installation.
-- Restores the `CustomSSOBrowserPath` saved by `install`.
+- Refuses to overwrite a Granted browser or keyring setting that no longer matches this installation.
+- Restores the browser and keyring settings saved by `install`.
 - Removes `$HOME/.config/granted-auto-auth/install.toml`.
 - Preserves `$HOME/.config/granted-auto-auth/credentials.toml`.
-- Preserves downloaded Chromium and `$HOME/.local/share/granted-auto-auth/browser` for recovery or later reuse.
+- Preserves downloaded Chromium, `$HOME/.local/share/granted-auto-auth/browser`, the Windows encrypted cache, and its managed WinCred password for recovery or later reuse.
 - Returns `0` on success and `1` on failure.
 
 ### Usage errors and exit statuses
@@ -338,14 +412,23 @@ A valid Granted cache returns immediately without launching Chromium. An expired
 | Path | Purpose | Removed by `uninstall`? |
 | --- | --- | --- |
 | `$HOME/.config/granted-auto-auth/credentials.toml` | Private IdP credentials and TOTP seed. | No |
-| `$HOME/.config/granted-auto-auth/install.toml` | Installation phase, previous browser setting, and Chromium identity. | Yes |
+| `$HOME/.config/granted-auto-auth/install.toml` | Installation phase, previous browser/keyring settings, managed target metadata, and Chromium identity. | Yes |
 | `$HOME/.local/share/granted-auto-auth/browser/` | Persistent dedicated Chromium profile. | No |
 | `$HOME/.local/share/granted-auto-auth/browser.lock` | Single-browser-process lock. | No |
+| `$HOME/.local/share/granted-auto-auth/granted-keyring/` | Windows Granted encrypted token cache. | No |
+| Windows Credential Manager target `granted-auto-auth/file-keyring-password/v1` | Password for the Windows encrypted token cache. | No |
 | `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth` | Public controller command. | No |
+| `$HOME/.config/granted-auto-auth/bin/granted-auto-auth` | PATH-facing launcher for the public controller. | No |
+| `$HOME/.local/bin/granted-auto-auth` | Symbolic link to the PATH-facing launcher on macOS and Ubuntu. | No |
+| `$HOME/.config/granted-auto-auth/scripts/link-local-bin.sh` | Idempotent symbolic-link installer for macOS and Ubuntu. | No |
+| `$HOME/.config/granted-auto-auth/scripts/link-local-bin.ps1` | Idempotent symbolic-link installer for Windows. | No |
 | `$HOME/.config/granted-auto-auth/scripts/granted_auto_auth.py` | Granted custom-browser sidecar; internal. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted_auto_auth_supervisor.py` | Windows Job Object supervisor; internal. | No |
+| `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth.ps1` | Windows controller launcher. | No |
 | `$HOME/.config/granted-auto-auth/scripts/granted-auto-auth-bin/assumego` | Deadline shim; internal. | No |
 | `$HOME/.config/granted-auto-auth/adapters/fish/assume.fish` | Generic Fish `assume` integration. | No |
 | `$HOME/.config/granted-auto-auth/adapters/bash/assume.bash` | Generic Ubuntu Bash `assume` integration. | No |
+| `$HOME/.config/granted-auto-auth/adapters/pwsh/assume.ps1` | Generic Windows PowerShell `assume` integration. | No |
 
 Do not commit `credentials.toml` or `install.toml`. Do not inspect or publish browser URLs, process arguments, SSO cache contents, TOTP values, or AWS credentials.
 
@@ -390,6 +473,10 @@ Common results:
 - `Secret Service default collection is locked`: unlock the user's default keyring collection, then rerun doctor.
 - `legacy inline SSO profiles detected`: migrate those AWS profiles to shared `[sso-session ...]` configuration when practical. This is a warning, not a failure.
 - Exit `124`: the shared hard deadline expired. Stop rather than starting a retry loop.
+- Exit `130` on Windows: Ctrl+C cancelled Granted and its complete Job Object tree.
+- `Granted Keyring Backend must be file on Windows; run: granted-auto-auth install`: run explicit installation to migrate an absent or `wincred` backend.
+- `managed keyring password is missing while encrypted cache is nonempty`: restore the Credential Manager target; never generate a replacement over existing encrypted data.
+- `browser profile ACL or reparse state is unsafe`: move state to NTFS, remove reparse points, and rerun `install` to create restricted ACLs.
 - `unsupported_challenge`: complete the unsupported step manually; do not weaken the browser selectors or bypass the challenge.
 
 Preserve Granted's encrypted cache and the browser profile during troubleshooting. A cache hit is expected and proves reuse; deleting `$HOME/.aws/cli`, `$HOME/.aws/sso`, or the browser profile is not a normal installation or repair step.
