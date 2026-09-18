@@ -502,7 +502,7 @@ def read_secure_bytes(path: Path) -> bytes:
     handle: int | None = None
     try:
         expected_parent = canonical_handle_path(parent)
-        if os.path.normcase(os.path.abspath(str(path.parent))) != expected_parent:
+        if canonical_path(path.parent) != expected_parent:
             raise PermissionError("parent path identity changed")
         handle = secure_open(path)
         size = _file_info(handle)
