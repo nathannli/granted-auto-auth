@@ -470,7 +470,7 @@ Common results:
 - `DisableCredentialProcessCache must be false; run: granted settings set --setting DisableCredentialProcessCache --value false`: run the displayed command.
 - `Secret Service is unavailable`: ensure the Ubuntu user D-Bus session and either `gnome-keyring-daemon` or KWallet `ksecretd` are running.
 - `Secret Service owner must be the user's gnome-keyring-daemon or ksecretd`: start a supported wallet and unlock its default collection.
-- `Secret Service default collection is locked`: unlock the user's default keyring collection, then rerun doctor.
+- `Secret Service default collection is locked`: blank-password wallets are unlocked automatically without a prompt; a password-protected default collection must be unlocked by the user, then rerun doctor.
 - `legacy inline SSO profiles detected`: migrate those AWS profiles to shared `[sso-session ...]` configuration when practical. This is a warning, not a failure.
 - Exit `124`: the shared hard deadline expired. Stop rather than starting a retry loop.
 - Exit `130` on Windows: Ctrl+C cancelled Granted and its complete Job Object tree.

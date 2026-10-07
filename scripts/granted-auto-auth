@@ -760,6 +760,25 @@ def _secret_service_process(pid: int) -> tuple[str, int]:
     return os.path.realpath(os.readlink(process / "exe")), process.stat().st_uid
 
 
+def _unlock_default_collection(owner: str) -> str:
+    # Blank-password wallets start locked but unlock without a prompt (prompt path "/").
+    # Never show a prompt: password-protected wallets stay locked.
+    try:
+        result = _busctl(
+            ["call", owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "Unlock", "ao", "1", "/org/freedesktop/secrets/aliases/default"]
+        )
+        prompt = result.rsplit(" ", 1)[-1]
+        if prompt != '"/"':
+            if prompt.startswith('"/org/freedesktop/secrets/prompt/'):
+                _busctl(["call", owner, prompt.strip('"'), "org.freedesktop.Secret.Prompt", "Dismiss"])
+            return "b true"
+        return _busctl(
+            ["get-property", owner, "/org/freedesktop/secrets/aliases/default", "org.freedesktop.Secret.Collection", "Locked"]
+        )
+    except ControllerError:
+        return "b true"
+
+
 def _secret_service_health() -> list[str]:
     try:
         owner_output = _busctl(
@@ -795,6 +814,8 @@ def _secret_service_health() -> list[str]:
             "Secret Service default collection is unavailable; configure and unlock a default collection "
             "in the supported wallet"
         ]
+    if locked == "b true":
+        locked = _unlock_default_collection(owner)
     if locked == "b true":
         return ["Secret Service default collection is locked; unlock the default collection in the supported wallet"]
     if locked != "b false":

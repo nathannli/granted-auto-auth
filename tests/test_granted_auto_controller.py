@@ -169,14 +169,24 @@ class ControllerTests(unittest.TestCase):
                 ],
             )
 
+    def test_secret_service_health_unlocks_blank_password_collection(self) -> None:
+        outputs = ['s ":1.42"', "u 1234", "b true", 'aoo 1 "/org/freedesktop/secrets/aliases/default" "/"', "b false"]
+        with mock.patch.object(controller, "_busctl", side_effect=outputs) as bus, mock.patch.object(
+            controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
+        ):
+            self.assertEqual(controller._secret_service_health(), [])
+        self.assertEqual(bus.call_args_list[3].args[0][4], "Unlock")
+
     def test_secret_service_health_rejects_locked_default_collection(self) -> None:
-        with mock.patch.object(controller, "_busctl", side_effect=['s ":1.42"', "u 1234", "b true"]), mock.patch.object(
+        outputs = ['s ":1.42"', "u 1234", "b true", 'aoo 0 "/org/freedesktop/secrets/prompt/u1"', ""]
+        with mock.patch.object(controller, "_busctl", side_effect=outputs) as bus, mock.patch.object(
             controller, "_secret_service_process", return_value=("/usr/bin/gnome-keyring-daemon", os.getuid())
         ):
             self.assertEqual(
                 controller._secret_service_health(),
                 ["Secret Service default collection is locked; unlock the default collection in the supported wallet"],
             )
+        self.assertEqual(bus.call_args_list[4].args[0][2:4], ["/org/freedesktop/secrets/prompt/u1", "org.freedesktop.Secret.Prompt"])
 
     def test_macos_platform_health_does_not_probe_secret_service(self) -> None:
         with mock.patch.object(controller.sys, "platform", "darwin"), mock.patch.object(
