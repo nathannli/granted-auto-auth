@@ -966,8 +966,9 @@ def doctor() -> int:
     warnings: list[str] = []
     try:
         version = run_checked(["granted", "--version"], capture=True).stdout.strip()
-        if "0.39." not in version:
-            failures.append("Granted v0.39.x is required; install a Granted v0.39.x release")
+        match = re.search(r"(\d+)\.(\d+)\.\d+", version)
+        if not match or (int(match[1]), int(match[2])) < (0, 39):
+            failures.append("Granted v0.39 or newer is required; install a supported Granted release")
         config = granted_config()
         if config.get("UseAuthorizationCode") is not True:
             failures.append(

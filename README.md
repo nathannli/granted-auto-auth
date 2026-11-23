@@ -1,6 +1,6 @@
 # granted-auto-auth
 
-`granted-auto-auth` is a shell-neutral controller and headless browser sidecar for Granted v0.39.x. Granted still owns AWS profile selection, IAM Identity Center tokens, and role credentials. This project automates only the supported browser reauthentication flow.
+`granted-auto-auth` is a shell-neutral controller and headless browser sidecar for Granted v0.39 and newer. Granted still owns AWS profile selection, IAM Identity Center tokens, and role credentials. This project automates only the supported browser reauthentication flow.
 
 ## Supported systems
 
@@ -29,7 +29,7 @@ Tested combinations:
 
 - Git
 - [uv](https://docs.astral.sh/uv/) with access to Python 3.12 or newer
-- [Granted](https://docs.commonfate.io/granted/getting-started) v0.39.x, with both `granted` and `assumego` on `PATH`
+- [Granted](https://docs.commonfate.io/granted/getting-started) v0.39 or newer, with both `granted` and `assumego` on `PATH`
 - Fish 4.x, Bash 5.x, or PowerShell 7.x configured to source the bundled adapter
 - Network access during `install` to resolve the locked script environment and download Chromium
 - On Ubuntu: `busctl`, a user D-Bus session, and an unlocked default Secret Service collection owned by the user's `gnome-keyring-daemon` or KWallet `ksecretd`
@@ -344,7 +344,7 @@ granted-auto-auth doctor
 Runs authentication-free diagnostics for:
 
 - credential file presence, fields, ownership, and permissions;
-- Granted v0.39.x availability;
+- Granted v0.39 or newer availability;
 - `UseAuthorizationCode=true`;
 - `DisableCredentialProcessCache=false`;
 - current installation and Chromium state;
@@ -465,7 +465,7 @@ granted-auto-auth doctor
 Common results:
 
 - `installation is not enabled; run: granted-auto-auth install`: run the displayed command, then rerun doctor.
-- `Granted v0.39.x is required; install a Granted v0.39.x release`: install a supported Granted release.
+- `Granted v0.39 or newer is required; install a supported Granted release`: install or upgrade to Granted v0.39 or newer.
 - `UseAuthorizationCode must be true; run: granted settings set --setting UseAuthorizationCode --value true`: run the displayed command.
 - `DisableCredentialProcessCache must be false; run: granted settings set --setting DisableCredentialProcessCache --value false`: run the displayed command.
 - `Secret Service is unavailable`: ensure the Ubuntu user D-Bus session and either `gnome-keyring-daemon` or KWallet `ksecretd` are running.
